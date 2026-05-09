@@ -1,0 +1,45 @@
+import csv
+
+from config import DATA_DIR
+from database import fetch_latest_prices, init_db
+
+
+OUTPUT_FILE = DATA_DIR / "latest_prices.csv"
+
+
+def export_latest_prices():
+    init_db()
+    rows = fetch_latest_prices()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    with OUTPUT_FILE.open("w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file)
+        writer.writerow(
+            [
+                "producto_buscado",
+                "producto_encontrado",
+                "farmacia",
+                "precio_cop",
+                "fecha_consulta",
+                "url_producto",
+            ]
+        )
+
+        for row in rows:
+            writer.writerow(
+                [
+                    row["search_name"],
+                    row["product_name"],
+                    row["pharmacy_name"],
+                    row["price_cop"],
+                    row["observed_at"],
+                    row["product_url"],
+                ]
+            )
+
+    print(f"Archivo creado: {OUTPUT_FILE}")
+    print(f"Total de registros exportados: {len(rows)}")
+
+
+if __name__ == "__main__":
+    export_latest_prices()
