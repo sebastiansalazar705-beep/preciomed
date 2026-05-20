@@ -60,6 +60,51 @@ https://tu-proyecto.onrender.com
 
 Ese link si lo pueden abrir tus companeros desde sus casas.
 
+## Ruta para trabajar desde tu PC
+
+Si descargaste el proyecto en esta carpeta, entra con PowerShell:
+
+```powershell
+cd "C:\Users\sebas\Documents\Codex\2026-05-19\necesito-verificar-cada-uno-de-los\preciomed-main"
+```
+
+Luego ejecuta:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python run_scraper.py
+python app.py
+```
+
+Abre la pagina local:
+
+```text
+http://127.0.0.1:5000
+```
+
+Cuando hagas cambios y tengas `git` instalado:
+
+```powershell
+git add .
+git commit -m "Mejorar validacion de productos y descuentos"
+git push
+```
+
+Render tomara los cambios desde GitHub y publicara otra vez el servicio.
+
+## Variables importantes en Render
+
+En Render revisa que el servicio tenga:
+
+```text
+Build Command: pip install -r requirements.txt
+Start Command: python start.py
+```
+
+Si Render te asigna un puerto automatico, no lo cambies: la app ya lee la variable `PORT`.
+
 ## Nota importante
 
 En un hosting gratuito, la base de datos SQLite puede reiniciarse si el servidor se apaga. Para una entrega universitaria esta version sirve como prototipo. Para una version mas profesional, el siguiente paso seria usar una base de datos en la nube como PostgreSQL.
