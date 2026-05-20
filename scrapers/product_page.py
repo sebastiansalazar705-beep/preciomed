@@ -5,7 +5,7 @@ import re
 import time
 import zlib
 from html import unescape
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -17,6 +17,32 @@ PRICE_PATTERN = re.compile(r"\$\s*([0-9][0-9\.\,]*)")
 TITLE_PATTERN = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
 TAG_PATTERN = re.compile(r"<[^>]+>")
 SPACE_PATTERN = re.compile(r"\s+")
+TOKEN_PATTERN = re.compile(r"[a-z]+|\d+")
+NOISE_TOKENS = {
+    "www",
+    "com",
+    "co",
+    "producto",
+    "products",
+    "html",
+    "p",
+    "cocv",
+    "caja",
+    "blister",
+    "tableta",
+    "tabletas",
+    "capsula",
+    "capsulas",
+    "recubierta",
+    "recubiertas",
+    "frasco",
+    "solucion",
+    "oral",
+    "dura",
+    "genfar",
+    "mk",
+    "x",
+}
 
 
 def load_sources():
@@ -56,13 +82,93 @@ def clean_text(value):
     return SPACE_PATTERN.sub(" ", value).strip()
 
 
-def extract_product_name(html, fallback, product_name_hint=None):
-    if product_name_hint:
-        return product_name_hint
+def normalize_text(value):
+    value = unquote(value or "").lower()
+    replacements = str.maketrans(
+        {
+            "á": "a",
+            "é": "e",
+            "í": "i",
+            "ó": "o",
+            "ú": "u",
+            "ñ": "n",
+        }
+    )
+    return value.translate(replacements)
 
+
+def tokens_from_text(value):
+    return [token for token in TOKEN_PATTERN.findall(normalize_text(value))]
+
+
+def important_tokens(value):
+    return {
+        token
+        for token in tokens_from_text(value)
+        if len(token) > 2
+        and token not in NOISE_TOKENS
+        and not (token.isdigit() and len(token) > 4)
+    }
+
+
+def expected_name_from_source(source):
+    if source.get("product_name_hint"):
+        return source["product_name_hint"]
+
+    path_parts = [
+        part
+        for part in urlparse(source["product_url"]).path.split("/")
+        if part and part.lower() != "p"
+    ]
+    slug = path_parts[-1] if path_parts else ""
+    if slug.lower().endswith(".html") and len(path_parts) >= 2:
+        slug = path_parts[-2]
+
+    slug = re.sub(r"^\d+-", "", slug)
+    slug = re.sub(r"-?\d{8,}$", "", slug)
+    slug = re.sub(r"COCV_\d+", "", slug, flags=re.IGNORECASE)
+    slug = slug.replace("-", " ")
+    if not important_tokens(slug):
+        return source["search_name"]
+    return slug or source["search_name"]
+
+
+def validate_product_match(source, product_name):
+    expected_name = expected_name_from_source(source)
+    expected_tokens = important_tokens(expected_name)
+    found_tokens = important_tokens(product_name)
+
+    if not expected_tokens:
+        return "review", 0, "No hay suficientes datos del producto esperado."
+
+    matching_tokens = expected_tokens & found_tokens
+    score = round((len(matching_tokens) / len(expected_tokens)) * 100)
+    missing_tokens = sorted(expected_tokens - found_tokens)
+
+    expected_numbers = {token for token in tokens_from_text(expected_name) if token.isdigit()}
+    found_numbers = {token for token in tokens_from_text(product_name) if token.isdigit()}
+    missing_numbers = sorted(expected_numbers - found_numbers)
+
+    if missing_numbers:
+        return (
+            "different",
+            score,
+            "Faltan datos clave de dosis/presentacion: " + ", ".join(missing_numbers),
+        )
+
+    if score >= 70:
+        return "ok", score, "Producto coincide con el enlace esperado."
+    if score >= 45:
+        return "review", score, "Revisar coincidencia: faltan " + ", ".join(missing_tokens)
+    return "different", score, "Producto diferente: faltan " + ", ".join(missing_tokens)
+
+
+def extract_product_name(html, fallback, product_name_hint=None):
     match = TITLE_PATTERN.search(html)
     if match:
         return clean_text(match.group(1))
+    if product_name_hint:
+        return product_name_hint
     return fallback.title()
 
 
@@ -81,11 +187,82 @@ def parse_price_cop(raw_price):
 
 
 def extract_price(html):
-    for match in PRICE_PATTERN.finditer(clean_text(html)):
-        price = parse_price_cop(match.group(1))
+    for price in collect_price_candidates(html):
         if price and price >= 100:
             return price
     return None
+
+
+def extract_price_pair(html):
+    prices = collect_price_candidates(html)
+
+    if not prices:
+        return None, None, None
+
+    sale_price = prices[0]
+    list_price = None
+    for price in prices[1:4]:
+        if price > sale_price:
+            list_price = price
+            break
+
+    discount_percent = calculate_discount(list_price, sale_price)
+    return sale_price, list_price, discount_percent
+
+
+def collect_price_candidates(html):
+    text = product_price_area(clean_text(html))
+    prices = []
+    for match in PRICE_PATTERN.finditer(text):
+        raw_price = match.group(1)
+        before = text[max(0, match.start() - 35) : match.start()].lower()
+
+        if is_unit_price_context(before):
+            continue
+        if looks_like_decimal_unit_price(raw_price):
+            continue
+
+        price = parse_price_cop(raw_price)
+        if price and 1_000 <= price <= 5_000_000:
+            prices.append(price)
+    return prices
+
+
+def product_price_area(text):
+    for marker in (" Agregar producto ", " Cantidad "):
+        marker_index = text.find(marker)
+        if marker_index > 0 and PRICE_PATTERN.search(text[:marker_index]):
+            return text[:marker_index]
+    return text
+
+
+def is_unit_price_context(before):
+    unit_markers = (
+        "pum:",
+        "unidades a",
+        "unidad a",
+        "tableta a",
+        "mililitros a",
+        "gramos a",
+        "otro a",
+    )
+    return any(marker in before for marker in unit_markers)
+
+
+def looks_like_decimal_unit_price(raw_price):
+    if "," in raw_price:
+        integer_part, decimal_part = raw_price.rsplit(",", 1)
+        return len(re.sub(r"\D", "", integer_part)) <= 4 and len(decimal_part) == 2
+    if "." in raw_price:
+        integer_part, decimal_part = raw_price.rsplit(".", 1)
+        return len(re.sub(r"\D", "", integer_part)) <= 4 and len(decimal_part) == 2
+    return False
+
+
+def calculate_discount(list_price, sale_price):
+    if not list_price or not sale_price or list_price <= sale_price:
+        return None
+    return round(((list_price - sale_price) / list_price) * 100, 1)
 
 
 def is_colsubsidio_source(source):
@@ -113,14 +290,21 @@ def scrape_colsubsidio(source):
         print(f"No encontre producto en API Colsubsidio: {source['product_url']}")
         return None
 
-    product = products[0]
+    product = choose_colsubsidio_product(source, products)
     item = product["items"][0]
     offer = item["sellers"][0]["commertialOffer"]
     price_cop = int(round(float(offer["Price"])))
+    list_price_cop = int(round(float(offer.get("ListPrice") or 0))) or None
+    discount_percent = calculate_discount(list_price_cop, price_cop)
 
     if price_cop <= 0:
         print(f"Producto sin precio disponible en Colsubsidio: {source['product_url']}")
         return None
+
+    match_status, match_score, match_notes = validate_product_match(
+        source,
+        product["productName"],
+    )
 
     return ScrapedPrice(
         pharmacy_name=source["pharmacy_name"],
@@ -128,8 +312,30 @@ def scrape_colsubsidio(source):
         search_name=source["search_name"],
         product_name=product["productName"],
         price_cop=price_cop,
+        list_price_cop=list_price_cop,
+        discount_percent=discount_percent,
+        product_match_status=match_status,
+        product_match_score=match_score,
+        match_notes=match_notes,
         product_url=product["link"],
     )
+
+
+def choose_colsubsidio_product(source, products):
+    expected_path = normalize_text(urlparse(source["product_url"]).path.rstrip("/"))
+    for product in products:
+        product_path = normalize_text(urlparse(product.get("link", "")).path.rstrip("/"))
+        if product_path == expected_path:
+            return product
+
+    expected_tokens = important_tokens(expected_name_from_source(source))
+    scored_products = []
+    for product in products:
+        product_tokens = important_tokens(product.get("productName", ""))
+        score = len(expected_tokens & product_tokens)
+        scored_products.append((score, product))
+    scored_products.sort(key=lambda item: item[0], reverse=True)
+    return scored_products[0][1]
 
 
 def scrape(products=None):
@@ -150,11 +356,16 @@ def scrape(products=None):
                 source["search_name"],
                 source.get("product_name_hint"),
             )
-            price_cop = extract_price(html)
+            price_cop, list_price_cop, discount_percent = extract_price_pair(html)
 
             if price_cop is None:
                 print(f"No encontre precio en: {source['product_url']}")
                 continue
+
+            match_status, match_score, match_notes = validate_product_match(
+                source,
+                product_name,
+            )
 
             results.append(
                 ScrapedPrice(
@@ -163,6 +374,11 @@ def scrape(products=None):
                     search_name=source["search_name"],
                     product_name=product_name,
                     price_cop=price_cop,
+                    list_price_cop=list_price_cop,
+                    discount_percent=discount_percent,
+                    product_match_status=match_status,
+                    product_match_score=match_score,
+                    match_notes=match_notes,
                     product_url=source["product_url"],
                 )
             )
