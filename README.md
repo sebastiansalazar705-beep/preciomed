@@ -8,6 +8,8 @@ Proyecto base en Python para recolectar precios de productos de farmacias, guard
 - Ejecuta un scraper de ejemplo para probar el flujo completo sin depender todavia de paginas reales.
 - Permite agregar scrapers reales farmacia por farmacia.
 - Muestra una pagina web local con la comparacion de precios.
+- Valida si el producto encontrado parece ser el mismo producto del enlace.
+- Guarda precio con descuento, precio antes y porcentaje de descuento cuando la pagina lo permite.
 - Incluye una ejecucion periodica sencilla para actualizar precios cada cierto tiempo.
 
 ## Estructura
@@ -68,6 +70,27 @@ Luego entra en el navegador a:
 ```text
 http://127.0.0.1:5000
 ```
+
+## Modelo de ejecucion recomendado
+
+1. Edita `data/product_sources.csv` y revisa que cada fila apunte al producto exacto que quieres comparar.
+2. Ejecuta `python run_scraper.py` para visitar cada enlace y guardar la ultima observacion.
+3. Abre `python app.py` y entra a `http://127.0.0.1:5000`.
+4. Revisa la columna `Validacion`:
+   - `OK`: el nombre encontrado coincide con el enlace esperado.
+   - `Revisar`: faltan datos para confirmar que sea exactamente igual.
+   - `Diferente`: faltan datos clave como dosis, cantidad o tokens del producto.
+5. Si una farmacia muestra `Diferente`, cambia esa URL en `data/product_sources.csv` por el enlace correcto.
+
+La interfaz muestra:
+
+- Producto encontrado.
+- Precio con descuento detectado.
+- Precio antes, si la pagina publica precio tachado o precio de lista.
+- Porcentaje de descuento calculado.
+- Nota de validacion del producto.
+
+Para que la comparacion sea justa, usa enlaces con la misma dosis y presentacion. Por ejemplo, no mezcles una caja x 30 con un blister x 10.
 
 ## Compartir con otras personas
 
