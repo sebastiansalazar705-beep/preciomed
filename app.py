@@ -28,7 +28,7 @@ HTML_START = """
         }
 
         main {
-            max-width: 1000px;
+            max-width: 1180px;
             margin: 0 auto;
             padding: 24px;
         }
@@ -67,6 +67,35 @@ HTML_START = """
             white-space: nowrap;
         }
 
+        .muted {
+            color: #64707d;
+            font-size: 13px;
+        }
+
+        .status {
+            border-radius: 999px;
+            display: inline-block;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 4px 8px;
+            white-space: nowrap;
+        }
+
+        .status-ok {
+            background: #d9f5e8;
+            color: #10613d;
+        }
+
+        .status-review {
+            background: #fff3c4;
+            color: #765800;
+        }
+
+        .status-different {
+            background: #ffe0e0;
+            color: #9b1c1c;
+        }
+
         .empty {
             background: white;
             border: 1px solid #d9dee5;
@@ -94,7 +123,24 @@ HTML_END = """
 
 
 def format_price(value):
+    if value is None:
+        return "No detectado"
     return f"${value:,.0f}".replace(",", ".")
+
+
+def format_discount(value):
+    if value is None:
+        return "Sin descuento"
+    return f"{value:.1f}%"
+
+
+def status_label(value):
+    labels = {
+        "ok": "OK",
+        "review": "Revisar",
+        "different": "Diferente",
+    }
+    return labels.get(value or "review", "Revisar")
 
 
 def render_page():
@@ -124,7 +170,10 @@ def render_page():
                         <tr>
                             <th>Farmacia</th>
                             <th>Producto encontrado</th>
-                            <th>Precio</th>
+                            <th>Precio con descuento</th>
+                            <th>Precio antes</th>
+                            <th>Descuento</th>
+                            <th>Validacion</th>
                             <th>Fecha consulta</th>
                             <th>Link</th>
                         </tr>
@@ -134,12 +183,24 @@ def render_page():
             )
 
             for row in rows:
+                match_status = row["product_match_status"] or "review"
                 content.append(
                     f"""
                     <tr>
                         <td>{escape(row["pharmacy_name"])}</td>
-                        <td>{escape(row["product_name"])}</td>
+                        <td>
+                            {escape(row["product_name"])}
+                            <div class="muted">{escape(row["match_notes"] or "")}</div>
+                        </td>
                         <td class="price">{format_price(row["price_cop"])}</td>
+                        <td>{format_price(row["list_price_cop"])}</td>
+                        <td>{format_discount(row["discount_percent"])}</td>
+                        <td>
+                            <span class="status status-{escape(match_status)}">
+                                {status_label(match_status)}
+                            </span>
+                            <div class="muted">{row["product_match_score"] or 0}%</div>
+                        </td>
                         <td>{escape(row["observed_at"][:10])}</td>
                         <td><a href="{escape(row["product_url"])}" target="_blank">Ver</a></td>
                     </tr>
