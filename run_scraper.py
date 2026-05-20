@@ -29,6 +29,11 @@ def run():
             product_name=item.product_name,
             price_cop=item.price_cop,
             product_url=item.product_url,
+            list_price_cop=item.list_price_cop,
+            discount_percent=item.discount_percent,
+            product_match_status=item.product_match_status,
+            product_match_score=item.product_match_score,
+            match_notes=item.match_notes,
         )
 
     print(f"Listo. Se guardaron {len(scraped_prices)} precios reales en la base de datos.")
