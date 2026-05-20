@@ -39,6 +39,11 @@ def init_db():
                 product_id INTEGER NOT NULL,
                 product_name TEXT NOT NULL,
                 price_cop INTEGER NOT NULL,
+                list_price_cop INTEGER,
+                discount_percent REAL,
+                product_match_status TEXT DEFAULT 'review',
+                product_match_score INTEGER DEFAULT 0,
+                match_notes TEXT DEFAULT '',
                 product_url TEXT,
                 observed_at TEXT NOT NULL,
                 FOREIGN KEY (pharmacy_id) REFERENCES pharmacies(id),
@@ -46,6 +51,30 @@ def init_db():
             );
             """
         )
+        ensure_price_observation_columns(connection)
+
+
+def ensure_price_observation_columns(connection):
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(price_observations)").fetchall()
+    }
+    migrations = {
+        "list_price_cop": "ALTER TABLE price_observations ADD COLUMN list_price_cop INTEGER",
+        "discount_percent": "ALTER TABLE price_observations ADD COLUMN discount_percent REAL",
+        "product_match_status": (
+            "ALTER TABLE price_observations "
+            "ADD COLUMN product_match_status TEXT DEFAULT 'review'"
+        ),
+        "product_match_score": (
+            "ALTER TABLE price_observations "
+            "ADD COLUMN product_match_score INTEGER DEFAULT 0"
+        ),
+        "match_notes": "ALTER TABLE price_observations ADD COLUMN match_notes TEXT DEFAULT ''",
+    }
+    for column_name, sql in migrations.items():
+        if column_name not in existing_columns:
+            connection.execute(sql)
 
 
 def upsert_pharmacy(name, website=None):
@@ -82,7 +111,18 @@ def upsert_product(search_name, category=None):
         return row["id"]
 
 
-def save_price_observation(pharmacy_id, product_id, product_name, price_cop, product_url):
+def save_price_observation(
+    pharmacy_id,
+    product_id,
+    product_name,
+    price_cop,
+    product_url,
+    list_price_cop=None,
+    discount_percent=None,
+    product_match_status="review",
+    product_match_score=0,
+    match_notes="",
+):
     observed_at = datetime.now(timezone.utc).isoformat()
     with get_connection() as connection:
         connection.execute(
@@ -92,12 +132,29 @@ def save_price_observation(pharmacy_id, product_id, product_name, price_cop, pro
                 product_id,
                 product_name,
                 price_cop,
+                list_price_cop,
+                discount_percent,
+                product_match_status,
+                product_match_score,
+                match_notes,
                 product_url,
                 observed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (pharmacy_id, product_id, product_name, price_cop, product_url, observed_at),
+            (
+                pharmacy_id,
+                product_id,
+                product_name,
+                price_cop,
+                list_price_cop,
+                discount_percent,
+                product_match_status,
+                product_match_score,
+                match_notes,
+                product_url,
+                observed_at,
+            ),
         )
 
 
@@ -119,6 +176,11 @@ def fetch_latest_prices():
                 ph.name AS pharmacy_name,
                 ph.website,
                 po.price_cop,
+                po.list_price_cop,
+                po.discount_percent,
+                po.product_match_status,
+                po.product_match_score,
+                po.match_notes,
                 po.product_url,
                 po.observed_at
             FROM latest l
