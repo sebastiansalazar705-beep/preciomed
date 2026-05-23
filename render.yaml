@@ -10,3 +10,5 @@ services:
         value: admin
       - key: PRECIOMED_SECRET_KEY
         generateValue: true
+      - key: MAX_USERS
+        value: 100000
