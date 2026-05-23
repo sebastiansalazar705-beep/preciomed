@@ -2,7 +2,11 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
 import socket
+import smtplib
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from http import HTTPStatus
 from html import escape
 from urllib.parse import urlencode
@@ -11,20 +15,39 @@ import bcrypt
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from config import MAX_USERS
+from config import (
+    EMAIL_FROM,
+    EMAIL_PASSWORD,
+    EMAIL_USER,
+    LOGIN_LOCK_MINUTES,
+    MAX_LOGIN_ATTEMPTS,
+    MAX_USERS,
+    REMEMBER_SESSION_DAYS,
+    RESET_CODE_MINUTES,
+    RESET_MAX_ATTEMPTS,
+    SESSION_HOURS,
+    SMTP_HOST,
+    SMTP_PORT,
+)
 from database import (
+    count_failed_logins,
     count_users,
+    create_password_reset_code,
     create_user,
     ensure_default_user,
     fetch_activity_logs,
     fetch_app_start_logs,
     fetch_latest_prices,
     fetch_users,
+    get_latest_password_reset_code_by_email,
+    get_password_reset_code,
     get_user_by_email,
     get_user_by_username,
+    increment_password_reset_attempt,
     init_db,
     log_activity,
     log_app_start,
+    mark_password_reset_code_used,
     update_last_login,
     update_user_password,
 )
@@ -38,6 +61,7 @@ DEFAULT_EMAIL = "admin@preciomed.local"
 DEFAULT_FULL_NAME = "Administrador PrecioMed"
 SESSION_COOKIE = "preciomed_session"
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+CODE_PATTERN = re.compile(r"^\d{6}$")
 
 app = FastAPI(title=APP_NAME)
 
@@ -124,20 +148,39 @@ def verify_password(password, password_hash):
     return hmac.compare_digest(legacy_hash, password_hash)
 
 
-def sign_session(email):
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def request_ip(request):
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+def sign_session(email, expires_at=None):
+    expires_at = expires_at or (utc_now() + timedelta(hours=SESSION_HOURS))
+    expires_text = str(int(expires_at.timestamp()))
+    payload = f"{email}:{expires_text}"
     signature = hmac.new(
         get_secret_key().encode("utf-8"),
-        email.encode("utf-8"),
+        payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return f"{email}:{signature}"
+    return f"{payload}:{signature}"
 
 
 def current_username_from_cookie(cookie_value):
-    if not cookie_value or ":" not in cookie_value:
+    if not cookie_value or cookie_value.count(":") != 2:
         return None
-    email, signature = cookie_value.split(":", 1)
-    expected = sign_session(email).split(":", 1)[1]
+    email, expires_text, signature = cookie_value.split(":", 2)
+    if not expires_text.isdigit() or int(expires_text) < int(utc_now().timestamp()):
+        return None
+    expected = sign_session(
+        email,
+        datetime.fromtimestamp(int(expires_text), timezone.utc),
+    ).split(":", 2)[2]
     if not hmac.compare_digest(signature, expected):
         return None
 
@@ -153,6 +196,11 @@ def verify_session(cookie_value):
 
 def current_username(request):
     return current_username_from_cookie(request.cookies.get(SESSION_COOKIE))
+
+
+def current_user(request):
+    email = current_username(request)
+    return get_user_by_email(email) if email else None
 
 
 def is_authenticated(request):
@@ -204,6 +252,48 @@ def validate_password_strength(password):
     if not re.search(r"\d", password):
         errors.append("un numero")
     return errors
+
+
+def generate_security_code():
+    return f"{secrets.randbelow(1000000):06d}"
+
+
+def send_security_code(email, code):
+    if not SMTP_HOST or not EMAIL_USER or not EMAIL_PASSWORD:
+        return False, "SMTP no configurado. Configura SMTP_HOST, SMTP_PORT, EMAIL_USER y EMAIL_PASSWORD."
+
+    message = EmailMessage()
+    message["Subject"] = "Codigo de recuperacion PrecioMed"
+    message["From"] = EMAIL_FROM or EMAIL_USER
+    message["To"] = email
+    message.set_content(
+        "\n".join(
+            [
+                "Hola.",
+                "",
+                "Tu codigo de recuperacion de PrecioMed es:",
+                code,
+                "",
+                f"Este codigo vence en {RESET_CODE_MINUTES} minutos.",
+                "Si no pediste recuperar tu contrasena, ignora este correo.",
+            ]
+        )
+    )
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.send_message(message)
+    return True, "Correo enviado."
+
+
+def reset_code_expired(row):
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    return expires_at < utc_now()
+
+
+def recovery_url(path, **params):
+    return f"{path}?{urlencode(params)}"
 
 
 def parse_price_filter(value):
@@ -265,6 +355,7 @@ def layout(title, body, authenticated=False, username=None):
     login_link = (
         (
             f'<span class="nav-user">{escape(username or "")}</span>'
+            '<a class="nav-link" href="/perfil">Perfil</a>'
             '<a class="nav-link" href="/usuarios">Usuarios</a>'
             '<a class="nav-link" href="/logout">Cerrar sesion</a>'
         )
@@ -550,7 +641,12 @@ def home_head():
 def login_form(request: Request, error: str = ""):
     if is_authenticated(request):
         return RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
-    error_html = '<p class="error">Usuario o contrasena incorrectos.</p>' if error else ""
+    error_messages = {
+        "1": "Usuario o contrasena incorrectos.",
+        "locked": f"Demasiados intentos fallidos. Intenta de nuevo en {LOGIN_LOCK_MINUTES} minutos.",
+        "expired": "Tu sesion expiro. Ingresa de nuevo.",
+    }
+    error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
     body = f"""
     <section class="panel login">
         <h1>Ingresar a PrecioMed</h1>
@@ -566,6 +662,7 @@ def login_form(request: Request, error: str = ""):
             <button type="submit">Ingresar</button>
         </form>
         <p><a href="/registro">Crear usuario nuevo</a></p>
+        <p><a href="/recuperar">Olvidaste tu contrasena?</a></p>
         <p class="muted">Correo inicial: admin@preciomed.local. Contrasena inicial: preciomed123. Cambialos en Render con variables de entorno.</p>
     </section>
     """
@@ -580,6 +677,17 @@ def login(
     remember: str = Form(""),
 ):
     email = email.strip().lower()
+    ip_address = request_ip(request)
+    if count_failed_logins(email, ip_address, LOGIN_LOCK_MINUTES) >= MAX_LOGIN_ATTEMPTS:
+        log_activity(
+            "login",
+            email=email,
+            ip_identifier=ip_address,
+            status="error",
+            message="Login bloqueado temporalmente por demasiados intentos.",
+        )
+        return RedirectResponse("/login?error=locked", status_code=HTTPStatus.SEE_OTHER)
+
     user = get_user_by_email(email)
     valid_password = user and user["is_active"] and verify_password(password, user["password_hash"])
     if not valid_password:
@@ -587,7 +695,7 @@ def login(
             "login",
             username=user["username"] if user else None,
             email=email,
-            ip_identifier=request.client.host if request.client else None,
+            ip_identifier=ip_address,
             status="error",
             message="Correo o contrasena incorrectos.",
         )
@@ -601,18 +709,21 @@ def login(
         "login",
         username=user["username"],
         email=user["email"],
-        ip_identifier=request.client.host if request.client else None,
+        ip_identifier=ip_address,
         status="exitoso",
         message="Inicio de sesion exitoso.",
+    )
+    session_expires_at = utc_now() + (
+        timedelta(days=REMEMBER_SESSION_DAYS) if remember else timedelta(hours=SESSION_HOURS)
     )
     response = RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
     response.set_cookie(
         SESSION_COOKIE,
-        sign_session(user["email"]),
+        sign_session(user["email"], session_expires_at),
         httponly=True,
         secure=os.environ.get("RENDER") == "true",
         samesite="lax",
-        max_age=60 * 60 * 24 * 30 if remember else 60 * 60 * 8,
+        max_age=60 * 60 * 24 * REMEMBER_SESSION_DAYS if remember else 60 * 60 * SESSION_HOURS,
     )
     return response
 
@@ -679,7 +790,7 @@ def register_user(
         "register",
         username=username,
         email=email,
-        ip_identifier=request.client.host if request.client else None,
+        ip_identifier=request_ip(request),
         status="exitoso",
         message="Usuario registrado correctamente.",
     )
@@ -691,6 +802,267 @@ def logout():
     response = RedirectResponse("/login", status_code=HTTPStatus.SEE_OTHER)
     response.delete_cookie(SESSION_COOKIE)
     return response
+
+
+@app.get("/perfil", response_class=HTMLResponse)
+def profile_form(request: Request, error: str = "", success: str = ""):
+    redirect = require_login(request)
+    if redirect:
+        return redirect
+
+    user = current_user(request)
+    error_messages = {
+        "current": "La contrasena actual es incorrecta.",
+        "match": "La nueva contrasena y su confirmacion no coinciden.",
+        "weak": "La nueva contrasena debe tener minimo 8 caracteres, una mayuscula, una minuscula y un numero.",
+    }
+    error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
+    success_html = '<p class="success">Contrasena actualizada correctamente.</p>' if success else ""
+    body = f"""
+    <h1>Perfil de usuario</h1>
+    <section class="panel login">
+        <h2>Datos de la cuenta</h2>
+        <p><strong>Nombre:</strong> {escape(user["full_name"] or "")}</p>
+        <p><strong>Correo:</strong> {escape(user["email"] or "")}</p>
+    </section>
+    <section class="panel login">
+        <h2>Cambiar contrasena</h2>
+        {error_html}
+        {success_html}
+        <form method="post" action="/perfil/cambiar-contrasena">
+            <input name="current_password" type="password" placeholder="Contrasena actual" autocomplete="current-password" required>
+            <input name="new_password" type="password" placeholder="Nueva contrasena" autocomplete="new-password" required>
+            <input name="confirm_password" type="password" placeholder="Confirmar nueva contrasena" autocomplete="new-password" required>
+            <button type="submit">Actualizar contrasena</button>
+        </form>
+        <p class="muted">Usa minimo 8 caracteres con mayuscula, minuscula y numero.</p>
+    </section>
+    """
+    return HTMLResponse(layout("Perfil", body, authenticated=True, username=user["email"]))
+
+
+@app.post("/perfil/cambiar-contrasena")
+def change_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    redirect = require_login(request)
+    if redirect:
+        return redirect
+
+    user = current_user(request)
+    if not verify_password(current_password, user["password_hash"]):
+        log_activity(
+            "password_change",
+            username=user["username"],
+            email=user["email"],
+            ip_identifier=request_ip(request),
+            status="error",
+            message="La contrasena actual es incorrecta.",
+        )
+        return RedirectResponse("/perfil?error=current", status_code=HTTPStatus.SEE_OTHER)
+    if new_password != confirm_password:
+        return RedirectResponse("/perfil?error=match", status_code=HTTPStatus.SEE_OTHER)
+    if validate_password_strength(new_password):
+        return RedirectResponse("/perfil?error=weak", status_code=HTTPStatus.SEE_OTHER)
+
+    update_user_password(user["id"], hash_password(new_password))
+    log_activity(
+        "password_change",
+        username=user["username"],
+        email=user["email"],
+        ip_identifier=request_ip(request),
+        status="exitoso",
+        message="Contrasena actualizada correctamente.",
+    )
+    return RedirectResponse("/perfil?success=1", status_code=HTTPStatus.SEE_OTHER)
+
+
+@app.get("/recuperar", response_class=HTMLResponse)
+def forgot_password_form(request: Request, sent: str = "", error: str = ""):
+    if is_authenticated(request):
+        return RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
+
+    error_html = '<p class="error">Escribe un correo electronico valido.</p>' if error else ""
+    sent_html = (
+        '<p class="success">Si el correo existe, enviaremos un codigo de seguridad. Revisa tu bandeja de entrada.</p>'
+        if sent
+        else ""
+    )
+    body = f"""
+    <section class="panel login">
+        <h1>Recuperar contrasena</h1>
+        <p>Ingresa tu correo para recibir un codigo temporal de seguridad.</p>
+        {error_html}
+        {sent_html}
+        <form method="post" action="/recuperar">
+            <input name="email" type="email" placeholder="Correo electronico" autocomplete="email" required>
+            <button type="submit">Enviar codigo</button>
+        </form>
+        <p><a href="/recuperar/codigo">Ya tengo un codigo</a></p>
+        <p><a href="/login">Volver al login</a></p>
+    </section>
+    """
+    return HTMLResponse(layout("Recuperar", body))
+
+
+@app.post("/recuperar")
+def request_password_reset(request: Request, email: str = Form(...)):
+    email = email.strip().lower()
+    if not EMAIL_PATTERN.match(email):
+        return RedirectResponse("/recuperar?error=email", status_code=HTTPStatus.SEE_OTHER)
+
+    user = get_user_by_email(email)
+    if user and user["is_active"]:
+        code = generate_security_code()
+        expires_at = (utc_now() + timedelta(minutes=RESET_CODE_MINUTES)).isoformat()
+        create_password_reset_code(user["id"], user["email"], code, expires_at, request_ip(request))
+        try:
+            email_sent, message = send_security_code(user["email"], code)
+        except Exception as error:
+            email_sent = False
+            message = str(error)
+
+        log_activity(
+            "password_reset_request",
+            username=user["username"],
+            email=user["email"],
+            ip_identifier=request_ip(request),
+            status="exitoso" if email_sent else "error",
+            message=message if email_sent else f"Codigo creado, pero no se pudo enviar correo: {message}",
+        )
+        if not email_sent:
+            print(f"Codigo de recuperacion PrecioMed para {user['email']}: {code}")
+
+    return RedirectResponse("/recuperar?sent=1", status_code=HTTPStatus.SEE_OTHER)
+
+
+@app.get("/recuperar/codigo", response_class=HTMLResponse)
+def reset_code_form(request: Request, email: str = "", error: str = ""):
+    error_messages = {
+        "invalid": "El codigo no es valido.",
+        "expired": "El codigo expiro. Solicita uno nuevo.",
+        "used": "Ese codigo ya fue usado. Solicita uno nuevo.",
+        "attempts": "Se alcanzo el numero maximo de intentos para este codigo.",
+    }
+    error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
+    body = f"""
+    <section class="panel login">
+        <h1>Codigo de seguridad</h1>
+        <p>Escribe el codigo de 6 digitos que recibiste por correo.</p>
+        {error_html}
+        <form method="post" action="/recuperar/codigo">
+            <input name="email" type="email" placeholder="Correo electronico" value="{escape(email)}" autocomplete="email" required>
+            <input name="code" inputmode="numeric" placeholder="Codigo de seguridad" maxlength="6" required>
+            <button type="submit">Validar codigo</button>
+        </form>
+        <p><a href="/recuperar">Solicitar otro codigo</a></p>
+    </section>
+    """
+    return HTMLResponse(layout("Codigo", body))
+
+
+@app.post("/recuperar/codigo")
+def validate_reset_code(email: str = Form(...), code: str = Form(...)):
+    email = email.strip().lower()
+    code = code.strip()
+    row = get_password_reset_code(email, code)
+    if not row or not CODE_PATTERN.match(code):
+        latest_code = get_latest_password_reset_code_by_email(email)
+        if latest_code and latest_code["attempts"] < RESET_MAX_ATTEMPTS:
+            increment_password_reset_attempt(latest_code["id"])
+        return RedirectResponse(
+            recovery_url("/recuperar/codigo", error="invalid", email=email),
+            status_code=HTTPStatus.SEE_OTHER,
+        )
+    if row["used"]:
+        return RedirectResponse(
+            recovery_url("/recuperar/codigo", error="used", email=email),
+            status_code=HTTPStatus.SEE_OTHER,
+        )
+    if row["attempts"] >= RESET_MAX_ATTEMPTS:
+        return RedirectResponse(
+            recovery_url("/recuperar/codigo", error="attempts", email=email),
+            status_code=HTTPStatus.SEE_OTHER,
+        )
+    if reset_code_expired(row):
+        return RedirectResponse(
+            recovery_url("/recuperar/codigo", error="expired", email=email),
+            status_code=HTTPStatus.SEE_OTHER,
+        )
+
+    return RedirectResponse(
+        recovery_url("/recuperar/nueva", email=email, code=code),
+        status_code=HTTPStatus.SEE_OTHER,
+    )
+
+
+@app.get("/recuperar/nueva", response_class=HTMLResponse)
+def new_password_form(request: Request, email: str = "", code: str = "", error: str = "", success: str = ""):
+    error_messages = {
+        "invalid": "El codigo no es valido o ya no esta disponible.",
+        "match": "La nueva contrasena y su confirmacion no coinciden.",
+        "weak": "La contrasena debe tener minimo 8 caracteres, una mayuscula, una minuscula y un numero.",
+    }
+    error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
+    success_html = '<p class="success">Contrasena actualizada correctamente. Ya puedes iniciar sesion.</p>' if success else ""
+    body = f"""
+    <section class="panel login">
+        <h1>Nueva contrasena</h1>
+        {error_html}
+        {success_html}
+        <form method="post" action="/recuperar/nueva">
+            <input name="email" type="hidden" value="{escape(email)}">
+            <input name="code" type="hidden" value="{escape(code)}">
+            <input name="new_password" type="password" placeholder="Nueva contrasena" autocomplete="new-password" required>
+            <input name="confirm_password" type="password" placeholder="Confirmar nueva contrasena" autocomplete="new-password" required>
+            <button type="submit">Guardar nueva contrasena</button>
+        </form>
+        <p><a href="/login">Volver al login</a></p>
+    </section>
+    """
+    return HTMLResponse(layout("Nueva contrasena", body))
+
+
+@app.post("/recuperar/nueva")
+def save_new_password(
+    request: Request,
+    email: str = Form(...),
+    code: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    email = email.strip().lower()
+    code = code.strip()
+    row = get_password_reset_code(email, code)
+    target = recovery_url("/recuperar/nueva", email=email, code=code)
+    if not row or row["used"] or reset_code_expired(row) or row["attempts"] >= RESET_MAX_ATTEMPTS:
+        return RedirectResponse(f"{target}&error=invalid", status_code=HTTPStatus.SEE_OTHER)
+    if new_password != confirm_password:
+        increment_password_reset_attempt(row["id"])
+        return RedirectResponse(f"{target}&error=match", status_code=HTTPStatus.SEE_OTHER)
+    if validate_password_strength(new_password):
+        increment_password_reset_attempt(row["id"])
+        return RedirectResponse(f"{target}&error=weak", status_code=HTTPStatus.SEE_OTHER)
+
+    user = get_user_by_email(email)
+    if not user or not user["is_active"]:
+        increment_password_reset_attempt(row["id"])
+        return RedirectResponse(f"{target}&error=invalid", status_code=HTTPStatus.SEE_OTHER)
+
+    update_user_password(user["id"], hash_password(new_password))
+    mark_password_reset_code_used(row["id"])
+    log_activity(
+        "password_reset_complete",
+        username=user["username"],
+        email=user["email"],
+        ip_identifier=request_ip(request),
+        status="exitoso",
+        message="Contrasena recuperada correctamente.",
+    )
+    return RedirectResponse("/login", status_code=HTTPStatus.SEE_OTHER)
 
 
 @app.get("/usuarios", response_class=HTMLResponse)

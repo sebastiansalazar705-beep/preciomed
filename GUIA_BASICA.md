@@ -24,6 +24,8 @@ La app permite:
 
 - Iniciar sesion.
 - Registrar usuarios hasta un limite maximo.
+- Cambiar la contrasena desde el perfil.
+- Recuperar la contrasena con codigo temporal por correo.
 - Ver medicamentos por farmacia.
 - Comparar precios cuando el mismo medicamento existe en varias farmacias.
 - Filtrar por medicamento, farmacia y precio.
@@ -238,6 +240,19 @@ Guarda usuarios registrados.
 
 Guarda actividad importante: inicio de aplicacion, login exitoso, login fallido y registro de usuarios.
 
+`password_reset_codes`
+
+Guarda codigos temporales de recuperacion de contrasena:
+
+- Usuario relacionado.
+- Correo.
+- Codigo de seguridad.
+- Fecha de creacion.
+- Fecha de expiracion.
+- Si ya fue usado.
+- Intentos realizados.
+- IP del equipo.
+
 ## Como funciona el login
 
 El login esta en `app.py`.
@@ -282,6 +297,108 @@ La cookie se llama:
 preciomed_session
 ```
 
+La cookie incluye una firma de seguridad y una fecha de expiracion. El tiempo normal se configura con:
+
+```text
+SESSION_HOURS=8
+```
+
+Si el usuario marca `Recordar sesion`, se usa:
+
+```text
+REMEMBER_SESSION_DAYS=30
+```
+
+## Cambio de contrasena
+
+El usuario autenticado puede entrar a:
+
+```text
+/perfil
+```
+
+Alli puede cambiar su contrasena escribiendo:
+
+- Contrasena actual.
+- Nueva contrasena.
+- Confirmacion de nueva contrasena.
+
+La aplicacion valida:
+
+- Que la contrasena actual sea correcta.
+- Que la nueva contrasena y la confirmacion coincidan.
+- Que la nueva contrasena sea segura.
+
+Mensajes principales:
+
+```text
+Contrasena actualizada correctamente.
+La contrasena actual es incorrecta.
+```
+
+La contrasena nueva se guarda cifrada con bcrypt.
+
+## Recuperacion de contrasena
+
+La recuperacion empieza en:
+
+```text
+/recuperar
+```
+
+Flujo:
+
+1. El usuario escribe su correo.
+2. Si el correo existe, la app genera un codigo aleatorio de 6 digitos.
+3. El codigo se guarda en `password_reset_codes`.
+4. La app intenta enviar el codigo por correo SMTP.
+5. El usuario entra a `/recuperar/codigo`.
+6. Escribe correo y codigo.
+7. Si el codigo es valido, pasa a `/recuperar/nueva`.
+8. Escribe nueva contrasena.
+9. El codigo queda marcado como usado.
+
+Configuraciones importantes:
+
+```text
+RESET_CODE_MINUTES=15
+RESET_MAX_ATTEMPTS=5
+```
+
+`RESET_CODE_MINUTES` define cuanto dura un codigo.
+`RESET_MAX_ATTEMPTS` define cuantos intentos se permiten antes de bloquear ese codigo.
+
+Si SMTP no esta configurado, la app guarda el codigo y lo imprime en consola para pruebas locales. Para publico real debes configurar correo.
+
+## Configurar correo SMTP
+
+Variables necesarias en Render:
+
+```text
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+EMAIL_USER=tu_correo@gmail.com
+EMAIL_PASSWORD=tu_password_de_aplicacion
+EMAIL_FROM=tu_correo@gmail.com
+```
+
+Con Gmail usa una contrasena de aplicacion. No pongas tu contrasena personal normal.
+
+Tambien puedes usar SendGrid u otro servicio SMTP cambiando `SMTP_HOST`, `SMTP_PORT`, `EMAIL_USER` y `EMAIL_PASSWORD`.
+
+## Proteccion contra fuerza bruta
+
+El login tiene bloqueo basico por intentos fallidos.
+
+Configuraciones:
+
+```text
+MAX_LOGIN_ATTEMPTS=5
+LOGIN_LOCK_MINUTES=15
+```
+
+Si un correo falla demasiadas veces desde la misma IP, la app bloquea temporalmente nuevos intentos.
+
 ## Seguridad basica
 
 La seguridad actual es basica y suficiente para un prototipo universitario:
@@ -289,6 +406,9 @@ La seguridad actual es basica y suficiente para un prototipo universitario:
 - Las contrasenas no se guardan en texto plano.
 - Se guardan como hash bcrypt.
 - La sesion usa una cookie firmada con `PRECIOMED_SECRET_KEY`.
+- La sesion tiene expiracion.
+- El login limita intentos fallidos.
+- La recuperacion usa codigos temporales que expiran y no se reutilizan.
 - Las rutas principales piden login.
 - El scraper no permite editar datos desde la web, solo actualizar precios.
 
@@ -500,6 +620,20 @@ El formulario de registro esta en:
 def register_form(...)
 ```
 
+El formulario de perfil y cambio de contrasena esta en:
+
+```python
+def profile_form(...)
+```
+
+Las pantallas de recuperacion estan en:
+
+```python
+def forgot_password_form(...)
+def reset_code_form(...)
+def new_password_form(...)
+```
+
 ### Agregar una nueva seccion visual
 
 Dentro de `home()`, busca:
@@ -574,6 +708,22 @@ El archivo `render.yaml` ya incluye:
 
 ```text
 MAX_USERS=100000
+```
+
+Variables nuevas recomendadas:
+
+```text
+SESSION_HOURS=8
+REMEMBER_SESSION_DAYS=30
+MAX_LOGIN_ATTEMPTS=5
+LOGIN_LOCK_MINUTES=15
+RESET_CODE_MINUTES=15
+RESET_MAX_ATTEMPTS=5
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+EMAIL_USER=tu_correo@gmail.com
+EMAIL_PASSWORD=tu_password_de_aplicacion
+EMAIL_FROM=tu_correo@gmail.com
 ```
 
 ## Recomendaciones para seguir aprendiendo

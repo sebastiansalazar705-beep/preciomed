@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from config import DATA_DIR, DB_PATH
 
@@ -81,12 +81,29 @@ def init_db():
                 message TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS password_reset_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                security_code TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                used_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                ip_address TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
             """
         )
         ensure_price_observation_columns(connection)
         ensure_user_columns(connection)
         connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reset_codes_email ON password_reset_codes(email)"
         )
 
 
@@ -145,6 +162,10 @@ def ensure_user_columns(connection):
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_now_datetime():
+    return datetime.now(timezone.utc)
 
 
 def ensure_default_user(username, email, full_name, password_hash):
@@ -304,6 +325,103 @@ def fetch_activity_logs(limit=50):
             """,
             (limit,),
         ).fetchall()
+
+
+def count_failed_logins(email, ip_identifier=None, minutes=15):
+    since = (utc_now_datetime() - timedelta(minutes=minutes)).isoformat()
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM activity_logs
+            WHERE event_type = 'login'
+              AND status = 'error'
+              AND created_at >= ?
+              AND lower(email) = lower(?)
+              AND (? IS NULL OR ip_identifier = ?)
+            """,
+            (since, email, ip_identifier, ip_identifier),
+        ).fetchone()["total"]
+
+
+def create_password_reset_code(user_id, email, security_code, expires_at, ip_address=None):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE password_reset_codes
+            SET used = 1, used_at = ?
+            WHERE user_id = ? AND used = 0
+            """,
+            (utc_now(), user_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO password_reset_codes (
+                user_id,
+                email,
+                security_code,
+                created_at,
+                expires_at,
+                used,
+                attempts,
+                ip_address
+            )
+            VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+            """,
+            (user_id, email, security_code, utc_now(), expires_at, ip_address),
+        )
+
+
+def get_password_reset_code(email, security_code):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, user_id, email, security_code, created_at, expires_at, used, attempts, ip_address
+            FROM password_reset_codes
+            WHERE lower(email) = lower(?) AND security_code = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (email, security_code),
+        ).fetchone()
+
+
+def get_latest_password_reset_code_by_email(email):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, user_id, email, security_code, created_at, expires_at, used, attempts, ip_address
+            FROM password_reset_codes
+            WHERE lower(email) = lower(?) AND used = 0
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (email,),
+        ).fetchone()
+
+
+def increment_password_reset_attempt(code_id):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE password_reset_codes
+            SET attempts = attempts + 1
+            WHERE id = ?
+            """,
+            (code_id,),
+        )
+
+
+def mark_password_reset_code_used(code_id):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE password_reset_codes
+            SET used = 1, used_at = ?
+            WHERE id = ?
+            """,
+            (utc_now(), code_id),
+        )
 
 
 def fetch_app_start_logs(limit=30):

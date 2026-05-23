@@ -9,6 +9,9 @@ La version principal usada para organizar este repositorio fue `upload-preciomed
 - Login con correo y contrasena cifrada con bcrypt.
 - Registro de usuarios con nombre completo, correo y confirmacion de contrasena.
 - Cookie de sesion firmada con clave secreta.
+- Cambio de contrasena desde el perfil.
+- Recuperacion de contrasena con codigo temporal por correo.
+- Bloqueo basico por intentos fallidos de login.
 - Dashboard de medicamentos.
 - Filtros por medicamento, farmacia, precio minimo y precio maximo.
 - Comparacion por medicamento entre farmacias.
@@ -34,10 +37,47 @@ PRECIOMED_ADMIN_EMAIL=admin@preciomed.local
 PRECIOMED_PASSWORD_HASH=<hash bcrypt de tu contrasena>
 PRECIOMED_SECRET_KEY=<clave larga aleatoria>
 MAX_USERS=100000
+SESSION_HOURS=8
+REMEMBER_SESSION_DAYS=30
+MAX_LOGIN_ATTEMPTS=5
+LOGIN_LOCK_MINUTES=15
+RESET_CODE_MINUTES=15
+RESET_MAX_ATTEMPTS=5
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+EMAIL_USER=tu_correo@gmail.com
+EMAIL_PASSWORD=tu_password_de_aplicacion
+EMAIL_FROM=tu_correo@gmail.com
 ```
 
 Si no defines `PRECIOMED_PASSWORD_HASH`, se usa la contrasena inicial de desarrollo.
 Usa `MAX_USERS=0` si quieres permitir registros ilimitados.
+
+## Seguridad y recuperacion de cuenta
+
+La aplicacion incluye:
+
+- Sesiones firmadas con expiracion.
+- Contrasenas cifradas con bcrypt.
+- Cambio de contrasena en `/perfil`.
+- Recuperacion de contrasena desde `/recuperar`.
+- Codigos temporales en la tabla `password_reset_codes`.
+- Intentos maximos por codigo con `RESET_MAX_ATTEMPTS`.
+- Bloqueo temporal de login con `MAX_LOGIN_ATTEMPTS` y `LOGIN_LOCK_MINUTES`.
+
+Flujo de recuperacion:
+
+1. El usuario entra a `/recuperar`.
+2. Escribe su correo.
+3. Si el correo existe, se crea un codigo de 6 digitos.
+4. El codigo vence segun `RESET_CODE_MINUTES`.
+5. El usuario valida el codigo en `/recuperar/codigo`.
+6. Crea una nueva contrasena en `/recuperar/nueva`.
+7. El codigo queda marcado como usado y no se puede reutilizar.
+
+Para enviar correos reales configura SMTP en Render. Con Gmail debes crear una `contrasena de aplicacion`, no usar tu contrasena normal.
+
+Si SMTP no esta configurado, la app no se rompe: guarda el codigo en la base de datos y lo imprime en la consola del servidor para pruebas locales.
 
 ## Instalar dependencias
 

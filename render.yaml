@@ -12,3 +12,25 @@ services:
         generateValue: true
       - key: MAX_USERS
         value: 100000
+      - key: SESSION_HOURS
+        value: 8
+      - key: REMEMBER_SESSION_DAYS
+        value: 30
+      - key: MAX_LOGIN_ATTEMPTS
+        value: 5
+      - key: LOGIN_LOCK_MINUTES
+        value: 15
+      - key: RESET_CODE_MINUTES
+        value: 15
+      - key: RESET_MAX_ATTEMPTS
+        value: 5
+      - key: SMTP_HOST
+        value: ""
+      - key: SMTP_PORT
+        value: 587
+      - key: EMAIL_USER
+        value: ""
+      - key: EMAIL_PASSWORD
+        value: ""
+      - key: EMAIL_FROM
+        value: ""
