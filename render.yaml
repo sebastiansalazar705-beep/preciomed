@@ -11,4 +11,4 @@ services:
       - key: PRECIOMED_SECRET_KEY
         generateValue: true
       - key: MAX_USERS
-        value: 3
+        value: 100000

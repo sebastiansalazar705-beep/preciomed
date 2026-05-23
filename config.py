@@ -16,5 +16,5 @@ SCRAPER_INTERVAL_MINUTES = 60
 USER_AGENT = "University price comparison project contact: student@example.com"
 
 # Maximo de usuarios que se pueden registrar en la plataforma.
-# En Render se puede cambiar creando una variable de entorno MAX_USERS.
-MAX_USERS = int(os.environ.get("MAX_USERS", "3"))
+# Usa 0 para permitir registros ilimitados. En Render se cambia con MAX_USERS.
+MAX_USERS = int(os.environ.get("MAX_USERS", "100000"))

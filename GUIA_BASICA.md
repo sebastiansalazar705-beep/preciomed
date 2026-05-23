@@ -92,7 +92,7 @@ Maneja la base de datos SQLite. Crea tablas y contiene funciones para:
 - Productos.
 - Observaciones de precios.
 - Usuarios.
-- Registros de inicio en `app_start_logs`.
+- Registros de actividad en `activity_logs`.
 
 `config.py`
 
@@ -165,10 +165,10 @@ python start.py
 http://127.0.0.1:5000
 ```
 
-Usuario inicial:
+Correo inicial:
 
 ```text
-admin
+admin@preciomed.local
 ```
 
 Contrasena inicial:
@@ -234,9 +234,9 @@ Guarda cada precio encontrado, con:
 
 Guarda usuarios registrados.
 
-`app_start_logs`
+`activity_logs`
 
-Guarda inicios de aplicacion e intentos de login.
+Guarda actividad importante: inicio de aplicacion, login exitoso, login fallido y registro de usuarios.
 
 ## Como funciona el login
 
@@ -252,12 +252,29 @@ GET  /registro
 POST /registro
 ```
 
+El registro solicita:
+
+- Nombre completo.
+- Correo electronico.
+- Contrasena.
+- Confirmacion de contrasena.
+
+La app valida:
+
+- Que el correo tenga formato valido.
+- Que el correo no este repetido.
+- Que la contrasena y su confirmacion coincidan.
+- Que la contrasena tenga minimo 8 caracteres, una mayuscula, una minuscula y un numero.
+- Que no se supere `MAX_USERS`.
+
 Cuando un usuario inicia sesion:
 
-1. Se busca el usuario en la tabla `users`.
-2. Se compara la contrasena usando SHA-256.
-3. Si es correcta, se crea una cookie firmada.
-4. Esa cookie permite entrar al dashboard.
+1. El usuario escribe correo y contrasena.
+2. Se busca el correo en la tabla `users`.
+3. Se valida que el usuario este activo.
+4. Se compara la contrasena usando bcrypt.
+5. Si es correcta, se crea una cookie firmada.
+6. Esa cookie permite entrar al dashboard.
 
 La cookie se llama:
 
@@ -270,24 +287,24 @@ preciomed_session
 La seguridad actual es basica y suficiente para un prototipo universitario:
 
 - Las contrasenas no se guardan en texto plano.
-- Se guardan como hash SHA-256.
+- Se guardan como hash bcrypt.
 - La sesion usa una cookie firmada con `PRECIOMED_SECRET_KEY`.
 - Las rutas principales piden login.
 - El scraper no permite editar datos desde la web, solo actualizar precios.
 
 Para produccion real se recomienda:
 
-- Usar bcrypt o argon2 para contrasenas.
+- Usar claves fuertes en Render.
 - Usar HTTPS.
 - Definir una clave secreta fuerte en Render.
 - Separar roles de usuario.
 
 ## Registro de inicios
 
-El registro se guarda en la tabla:
+El registro de actividad se guarda en la tabla:
 
 ```text
-app_start_logs
+activity_logs
 ```
 
 Guarda:
@@ -318,10 +335,15 @@ Despues de iniciar sesion.
 El limite esta en `config.py`:
 
 ```python
-MAX_USERS = int(os.environ.get("MAX_USERS", "3"))
+MAX_USERS = int(os.environ.get("MAX_USERS", "100000"))
 ```
 
-Por defecto permite 3 usuarios.
+Por defecto permite 100000 usuarios, que para este proyecto funciona como un limite practicamente ilimitado.
+Si quieres que sea ilimitado de verdad, usa:
+
+```text
+MAX_USERS=0
+```
 
 Si se intenta registrar un usuario cuando ya se alcanzo el limite, la app muestra:
 
@@ -343,6 +365,7 @@ Ejemplos:
 MAX_USERS=5
 MAX_USERS=10
 MAX_USERS=20
+MAX_USERS=0
 ```
 
 Para saber cuantos usuarios hay, entra a:
@@ -550,7 +573,7 @@ uvicorn app:app --host 0.0.0.0 --port $PORT
 El archivo `render.yaml` ya incluye:
 
 ```text
-MAX_USERS=3
+MAX_USERS=100000
 ```
 
 ## Recomendaciones para seguir aprendiendo

@@ -53,9 +53,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
+                full_name TEXT,
+                email TEXT,
                 password_hash TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                last_login_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS app_start_logs (
@@ -66,9 +69,25 @@ def init_db():
                 status TEXT NOT NULL,
                 error_message TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                username TEXT,
+                email TEXT,
+                ip_identifier TEXT,
+                status TEXT NOT NULL,
+                message TEXT
+            );
+
             """
         )
         ensure_price_observation_columns(connection)
+        ensure_user_columns(connection)
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)"
+        )
 
 
 def ensure_price_observation_columns(connection):
@@ -94,25 +113,63 @@ def ensure_price_observation_columns(connection):
             connection.execute(sql)
 
 
+def ensure_user_columns(connection):
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+    migrations = {
+        "full_name": "ALTER TABLE users ADD COLUMN full_name TEXT",
+        "email": "ALTER TABLE users ADD COLUMN email TEXT",
+        "last_login_at": "ALTER TABLE users ADD COLUMN last_login_at TEXT",
+    }
+    for column_name, sql in migrations.items():
+        if column_name not in existing_columns:
+            connection.execute(sql)
+
+    connection.execute(
+        """
+        UPDATE users
+        SET email = username
+        WHERE email IS NULL OR email = ''
+        """
+    )
+    connection.execute(
+        """
+        UPDATE users
+        SET full_name = username
+        WHERE full_name IS NULL OR full_name = ''
+        """
+    )
+
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def ensure_default_user(username, password_hash):
+def ensure_default_user(username, email, full_name, password_hash):
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT id FROM users WHERE username = ?",
-            (username,),
+            "SELECT id FROM users WHERE username = ? OR email = ?",
+            (username, email),
         ).fetchone()
         if row:
+            connection.execute(
+                """
+                UPDATE users
+                SET username = ?, email = ?, full_name = ?
+                WHERE id = ?
+                """,
+                (username, email, full_name, row["id"]),
+            )
             return row["id"]
 
         connection.execute(
             """
-            INSERT INTO users (username, password_hash, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO users (username, full_name, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (username, password_hash, utc_now()),
+            (username, full_name, email, password_hash, utc_now()),
         )
         return connection.execute(
             "SELECT id FROM users WHERE username = ?",
@@ -131,7 +188,7 @@ def fetch_users():
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, is_active, created_at
+            SELECT id, username, full_name, email, is_active, created_at, last_login_at
             FROM users
             ORDER BY created_at ASC
             """
@@ -142,7 +199,7 @@ def get_user_by_username(username):
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, password_hash, is_active, created_at
+            SELECT id, username, full_name, email, password_hash, is_active, created_at, last_login_at
             FROM users
             WHERE username = ?
             """,
@@ -150,19 +207,47 @@ def get_user_by_username(username):
         ).fetchone()
 
 
-def create_user(username, password_hash):
+def get_user_by_email(email):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, username, full_name, email, password_hash, is_active, created_at, last_login_at
+            FROM users
+            WHERE lower(email) = lower(?)
+            """,
+            (email,),
+        ).fetchone()
+
+
+def create_user(username, full_name, email, password_hash):
     with get_connection() as connection:
         connection.execute(
             """
-            INSERT INTO users (username, password_hash, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO users (username, full_name, email, password_hash, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (username, password_hash, utc_now()),
+            (username, full_name, email, password_hash, utc_now()),
         )
         return connection.execute(
             "SELECT id FROM users WHERE username = ?",
             (username,),
         ).fetchone()["id"]
+
+
+def update_user_password(user_id, password_hash):
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (password_hash, user_id),
+        )
+
+
+def update_last_login(user_id):
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE users SET last_login_at = ? WHERE id = ?",
+            (utc_now(), user_id),
+        )
 
 
 def log_app_start(username=None, ip_identifier=None, status="exitoso", error_message=None):
@@ -180,6 +265,45 @@ def log_app_start(username=None, ip_identifier=None, status="exitoso", error_mes
             """,
             (utc_now(), username, ip_identifier, status, error_message),
         )
+
+
+def log_activity(
+    event_type,
+    username=None,
+    email=None,
+    ip_identifier=None,
+    status="exitoso",
+    message=None,
+):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO activity_logs (
+                created_at,
+                event_type,
+                username,
+                email,
+                ip_identifier,
+                status,
+                message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (utc_now(), event_type, username, email, ip_identifier, status, message),
+        )
+
+
+def fetch_activity_logs(limit=50):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, created_at, event_type, username, email, ip_identifier, status, message
+            FROM activity_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
 
 def fetch_app_start_logs(limit=30):

@@ -6,7 +6,8 @@ La version principal usada para organizar este repositorio fue `upload-preciomed
 
 ## Funcionalidades
 
-- Login basico de usuario.
+- Login con correo y contrasena cifrada con bcrypt.
+- Registro de usuarios con nombre completo, correo y confirmacion de contrasena.
 - Cookie de sesion firmada con clave secreta.
 - Dashboard de medicamentos.
 - Filtros por medicamento, farmacia, precio minimo y precio maximo.
@@ -21,7 +22,7 @@ La version principal usada para organizar este repositorio fue `upload-preciomed
 Para desarrollo local:
 
 ```text
-Usuario: admin
+Correo: admin@preciomed.local
 Contrasena: preciomed123
 ```
 
@@ -29,11 +30,14 @@ En Render se recomienda configurar variables de entorno:
 
 ```text
 PRECIOMED_USERNAME=admin
-PRECIOMED_PASSWORD_HASH=<hash sha256 de tu contrasena>
+PRECIOMED_ADMIN_EMAIL=admin@preciomed.local
+PRECIOMED_PASSWORD_HASH=<hash bcrypt de tu contrasena>
 PRECIOMED_SECRET_KEY=<clave larga aleatoria>
+MAX_USERS=100000
 ```
 
 Si no defines `PRECIOMED_PASSWORD_HASH`, se usa la contrasena inicial de desarrollo.
+Usa `MAX_USERS=0` si quieres permitir registros ilimitados.
 
 ## Instalar dependencias
 
