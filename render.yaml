@@ -12,6 +12,8 @@ services:
         generateValue: true
       - key: MAX_USERS
         value: 100000
+      - key: ADMIN_EMAILS
+        value: admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
       - key: SESSION_HOURS
         value: 8
       - key: REMEMBER_SESSION_DAYS

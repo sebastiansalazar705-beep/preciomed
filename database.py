@@ -56,6 +56,7 @@ def init_db():
                 full_name TEXT,
                 email TEXT,
                 password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'cliente',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 last_login_at TEXT
@@ -138,6 +139,7 @@ def ensure_user_columns(connection):
     migrations = {
         "full_name": "ALTER TABLE users ADD COLUMN full_name TEXT",
         "email": "ALTER TABLE users ADD COLUMN email TEXT",
+        "role": "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'cliente'",
         "last_login_at": "ALTER TABLE users ADD COLUMN last_login_at TEXT",
     }
     for column_name, sql in migrations.items():
@@ -168,7 +170,7 @@ def utc_now_datetime():
     return datetime.now(timezone.utc)
 
 
-def ensure_default_user(username, email, full_name, password_hash):
+def ensure_default_user(username, email, full_name, password_hash, role="admin"):
     with get_connection() as connection:
         row = connection.execute(
             "SELECT id FROM users WHERE username = ? OR email = ?",
@@ -178,19 +180,19 @@ def ensure_default_user(username, email, full_name, password_hash):
             connection.execute(
                 """
                 UPDATE users
-                SET username = ?, email = ?, full_name = ?
+                SET username = ?, email = ?, full_name = ?, role = ?
                 WHERE id = ?
                 """,
-                (username, email, full_name, row["id"]),
+                (username, email, full_name, role, row["id"]),
             )
             return row["id"]
 
         connection.execute(
             """
-            INSERT INTO users (username, full_name, email, password_hash, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO users (username, full_name, email, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (username, full_name, email, password_hash, utc_now()),
+            (username, full_name, email, password_hash, role, utc_now()),
         )
         return connection.execute(
             "SELECT id FROM users WHERE username = ?",
@@ -209,7 +211,7 @@ def fetch_users():
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, full_name, email, is_active, created_at, last_login_at
+            SELECT id, username, full_name, email, role, is_active, created_at, last_login_at
             FROM users
             ORDER BY created_at ASC
             """
@@ -220,7 +222,7 @@ def get_user_by_username(username):
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, full_name, email, password_hash, is_active, created_at, last_login_at
+            SELECT id, username, full_name, email, password_hash, role, is_active, created_at, last_login_at
             FROM users
             WHERE username = ?
             """,
@@ -232,7 +234,7 @@ def get_user_by_email(email):
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, full_name, email, password_hash, is_active, created_at, last_login_at
+            SELECT id, username, full_name, email, password_hash, role, is_active, created_at, last_login_at
             FROM users
             WHERE lower(email) = lower(?)
             """,
@@ -240,14 +242,14 @@ def get_user_by_email(email):
         ).fetchone()
 
 
-def create_user(username, full_name, email, password_hash):
+def create_user(username, full_name, email, password_hash, role="cliente"):
     with get_connection() as connection:
         connection.execute(
             """
-            INSERT INTO users (username, full_name, email, password_hash, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO users (username, full_name, email, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (username, full_name, email, password_hash, utc_now()),
+            (username, full_name, email, password_hash, role, utc_now()),
         )
         return connection.execute(
             "SELECT id FROM users WHERE username = ?",
@@ -327,6 +329,20 @@ def fetch_activity_logs(limit=50):
         ).fetchall()
 
 
+def fetch_activity_logs_by_email(email, limit=20):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, created_at, event_type, username, email, ip_identifier, status, message
+            FROM activity_logs
+            WHERE lower(email) = lower(?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (email, limit),
+        ).fetchall()
+
+
 def count_failed_logins(email, ip_identifier=None, minutes=15):
     since = (utc_now_datetime() - timedelta(minutes=minutes)).isoformat()
     with get_connection() as connection:
@@ -353,6 +369,14 @@ def create_password_reset_code(user_id, email, security_code, expires_at, ip_add
             WHERE user_id = ? AND used = 0
             """,
             (utc_now(), user_id),
+        )
+
+
+def update_user_role(user_id, role):
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE users SET role = ? WHERE id = ?",
+            (role, user_id),
         )
         connection.execute(
             """

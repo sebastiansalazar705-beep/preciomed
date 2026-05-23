@@ -19,6 +19,16 @@ USER_AGENT = "University price comparison project contact: student@example.com"
 # Usa 0 para permitir registros ilimitados. En Render se cambia con MAX_USERS.
 MAX_USERS = int(os.environ.get("MAX_USERS", "100000"))
 
+# Correos con permiso administrativo. Cambialos en Render con ADMIN_EMAILS.
+ADMIN_EMAILS = [
+    item.strip().lower()
+    for item in os.environ.get(
+        "ADMIN_EMAILS",
+        "admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local",
+    ).split(",")
+    if item.strip()
+]
+
 # Seguridad de sesiones, login y recuperacion de contrasena.
 SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "8"))
 REMEMBER_SESSION_DAYS = int(os.environ.get("REMEMBER_SESSION_DAYS", "30"))

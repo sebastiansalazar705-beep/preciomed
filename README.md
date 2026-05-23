@@ -12,6 +12,9 @@ La version principal usada para organizar este repositorio fue `upload-preciomed
 - Cambio de contrasena desde el perfil.
 - Recuperacion de contrasena con codigo temporal por correo.
 - Bloqueo basico por intentos fallidos de login.
+- Roles de usuario: `admin` y `cliente`.
+- Dashboard administrativo separado del dashboard de clientes.
+- Interfaz moderna con menu lateral, tarjetas, buscador y vista responsive.
 - Dashboard de medicamentos.
 - Filtros por medicamento, farmacia, precio minimo y precio maximo.
 - Comparacion por medicamento entre farmacias.
@@ -34,6 +37,7 @@ En Render se recomienda configurar variables de entorno:
 ```text
 PRECIOMED_USERNAME=admin
 PRECIOMED_ADMIN_EMAIL=admin@preciomed.local
+ADMIN_EMAILS=admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
 PRECIOMED_PASSWORD_HASH=<hash bcrypt de tu contrasena>
 PRECIOMED_SECRET_KEY=<clave larga aleatoria>
 MAX_USERS=100000
@@ -64,6 +68,36 @@ La aplicacion incluye:
 - Codigos temporales en la tabla `password_reset_codes`.
 - Intentos maximos por codigo con `RESET_MAX_ATTEMPTS`.
 - Bloqueo temporal de login con `MAX_LOGIN_ATTEMPTS` y `LOGIN_LOCK_MINUTES`.
+
+## Roles y permisos
+
+PrecioMed separa usuarios en:
+
+- `admin`: acceso completo al panel administrativo.
+- `cliente`: acceso al dashboard de medicamentos, perfil y recuperacion de cuenta.
+
+Los clientes no pueden entrar a:
+
+- `/admin`
+- `/usuarios`
+- `/actualizar`
+
+Los correos administradores se configuran con:
+
+```text
+ADMIN_EMAILS=admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
+```
+
+Si una persona se registra con uno de esos correos, la app le asigna rol `admin`. Los demas usuarios quedan como `cliente`.
+
+Paneles principales:
+
+```text
+/          Dashboard de medicamentos
+/perfil    Perfil y cambio de contrasena
+/admin     Panel administrativo
+/usuarios  Usuarios y logs
+```
 
 Flujo de recuperacion:
 

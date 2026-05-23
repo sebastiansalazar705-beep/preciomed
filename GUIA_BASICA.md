@@ -26,6 +26,7 @@ La app permite:
 - Registrar usuarios hasta un limite maximo.
 - Cambiar la contrasena desde el perfil.
 - Recuperar la contrasena con codigo temporal por correo.
+- Separar permisos entre administradores y clientes.
 - Ver medicamentos por farmacia.
 - Comparar precios cuando el mismo medicamento existe en varias farmacias.
 - Filtrar por medicamento, farmacia y precio.
@@ -235,6 +236,12 @@ Guarda cada precio encontrado, con:
 `users`
 
 Guarda usuarios registrados.
+Tambien guarda el campo `role`, que puede ser:
+
+```text
+admin
+cliente
+```
 
 `activity_logs`
 
@@ -265,6 +272,9 @@ POST /login
 GET  /logout
 GET  /registro
 POST /registro
+GET  /perfil
+GET  /admin
+GET  /usuarios
 ```
 
 El registro solicita:
@@ -296,6 +306,50 @@ La cookie se llama:
 ```text
 preciomed_session
 ```
+
+## Roles: administradores y clientes
+
+PrecioMed tiene dos roles:
+
+```text
+admin
+cliente
+```
+
+Los administradores pueden:
+
+- Ver todos los usuarios.
+- Ver registros y logs.
+- Entrar a `/admin`.
+- Entrar a `/usuarios`.
+- Actualizar precios desde `/actualizar`.
+- Ver datos administrativos.
+
+Los clientes pueden:
+
+- Entrar a su dashboard.
+- Buscar medicamentos.
+- Comparar precios.
+- Entrar a su perfil.
+- Cambiar contrasena.
+- Recuperar contrasena.
+- Ver su propia actividad reciente en el perfil.
+
+Los clientes no pueden:
+
+- Entrar al panel admin.
+- Ver usuarios.
+- Ver logs globales.
+- Actualizar precios.
+
+Los correos administradores se configuran en `config.py` o Render con:
+
+```text
+ADMIN_EMAILS=admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
+```
+
+Si alguien se registra con uno de esos correos, queda como `admin`.
+Los demas registros quedan como `cliente`.
 
 La cookie incluye una firma de seguridad y una fecha de expiracion. El tiempo normal se configura con:
 
@@ -512,6 +566,15 @@ def layout(...)
 
 Ahi esta el HTML general y el CSS.
 
+La interfaz moderna usa:
+
+- Menu lateral.
+- Tarjetas de resumen.
+- Hero visual con imagen relacionada con salud.
+- Formularios con foco visual.
+- Botones principales y secundarios.
+- Responsive para pantallas pequenas.
+
 ### Cambiar colores
 
 Busca en `layout()`:
@@ -626,6 +689,13 @@ El formulario de perfil y cambio de contrasena esta en:
 def profile_form(...)
 ```
 
+El panel administrativo esta en:
+
+```python
+def admin_dashboard(...)
+def users_view(...)
+```
+
 Las pantallas de recuperacion estan en:
 
 ```python
@@ -713,6 +783,7 @@ MAX_USERS=100000
 Variables nuevas recomendadas:
 
 ```text
+ADMIN_EMAILS=admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
 SESSION_HOURS=8
 REMEMBER_SESSION_DAYS=30
 MAX_LOGIN_ATTEMPTS=5

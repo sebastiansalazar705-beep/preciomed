@@ -1,5 +1,7 @@
 import hashlib
 import hmac
+import base64
+import json
 import os
 import re
 import secrets
@@ -16,6 +18,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from config import (
+    ADMIN_EMAILS,
     EMAIL_FROM,
     EMAIL_PASSWORD,
     EMAIL_USER,
@@ -36,6 +39,7 @@ from database import (
     create_user,
     ensure_default_user,
     fetch_activity_logs,
+    fetch_activity_logs_by_email,
     fetch_app_start_logs,
     fetch_latest_prices,
     fetch_users,
@@ -50,6 +54,7 @@ from database import (
     mark_password_reset_code_used,
     update_last_login,
     update_user_password,
+    update_user_role,
 )
 from run_scraper import run as run_scraper
 
@@ -59,6 +64,8 @@ DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "preciomed123"
 DEFAULT_EMAIL = "admin@preciomed.local"
 DEFAULT_FULL_NAME = "Administrador PrecioMed"
+ROLE_ADMIN = "admin"
+ROLE_CLIENT = "cliente"
 SESSION_COOKIE = "preciomed_session"
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CODE_PATTERN = re.compile(r"^\d{6}$")
@@ -84,7 +91,9 @@ def startup_event():
             get_admin_email(),
             DEFAULT_FULL_NAME,
             get_password_hash(),
+            ROLE_ADMIN,
         )
+        apply_admin_roles()
         log_app_start(
             username=None,
             ip_identifier=machine_identifier(),
@@ -128,6 +137,23 @@ def get_admin_email():
     return os.environ.get("PRECIOMED_ADMIN_EMAIL", DEFAULT_EMAIL).strip().lower()
 
 
+def configured_admin_emails():
+    emails = set(ADMIN_EMAILS)
+    emails.add(get_admin_email())
+    return {email.strip().lower() for email in emails if email.strip()}
+
+
+def role_for_email(email):
+    return ROLE_ADMIN if email.strip().lower() in configured_admin_emails() else ROLE_CLIENT
+
+
+def apply_admin_roles():
+    for user in fetch_users():
+        desired_role = role_for_email(user["email"] or user["username"])
+        if user["role"] != desired_role:
+            update_user_role(user["id"], desired_role)
+
+
 def get_password_hash():
     password_hash = os.environ.get("PRECIOMED_PASSWORD_HASH")
     if password_hash:
@@ -161,28 +187,52 @@ def request_ip(request):
 
 def sign_session(email, expires_at=None):
     expires_at = expires_at or (utc_now() + timedelta(hours=SESSION_HOURS))
-    expires_text = str(int(expires_at.timestamp()))
-    payload = f"{email}:{expires_text}"
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "sub": email,
+        "exp": int(expires_at.timestamp()),
+    }
+    header_text = base64.urlsafe_b64encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    ).decode("utf-8").rstrip("=")
+    payload_text = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("utf-8").rstrip("=")
+    token_payload = f"{header_text}.{payload_text}"
     signature = hmac.new(
         get_secret_key().encode("utf-8"),
-        payload.encode("utf-8"),
+        token_payload.encode("utf-8"),
         hashlib.sha256,
-    ).hexdigest()
-    return f"{payload}:{signature}"
+    ).digest()
+    signature_text = base64.urlsafe_b64encode(signature).decode("utf-8").rstrip("=")
+    return f"{token_payload}.{signature_text}"
+
+
+def decode_urlsafe_json(value):
+    padded = value + "=" * (-len(value) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
 
 
 def current_username_from_cookie(cookie_value):
-    if not cookie_value or cookie_value.count(":") != 2:
+    if not cookie_value or cookie_value.count(".") != 2:
         return None
-    email, expires_text, signature = cookie_value.split(":", 2)
-    if not expires_text.isdigit() or int(expires_text) < int(utc_now().timestamp()):
+    header_text, payload_text, signature = cookie_value.split(".", 2)
+    token_payload = f"{header_text}.{payload_text}"
+    expected = hmac.new(
+        get_secret_key().encode("utf-8"),
+        token_payload.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    expected_text = base64.urlsafe_b64encode(expected).decode("utf-8").rstrip("=")
+    if not hmac.compare_digest(signature, expected_text):
         return None
-    expected = sign_session(
-        email,
-        datetime.fromtimestamp(int(expires_text), timezone.utc),
-    ).split(":", 2)[2]
-    if not hmac.compare_digest(signature, expected):
+    try:
+        payload = decode_urlsafe_json(payload_text)
+    except (ValueError, json.JSONDecodeError):
         return None
+    if int(payload.get("exp", 0)) < int(utc_now().timestamp()):
+        return None
+    email = payload.get("sub", "")
 
     user = get_user_by_email(email)
     if not user or not user["is_active"]:
@@ -203,6 +253,10 @@ def current_user(request):
     return get_user_by_email(email) if email else None
 
 
+def is_admin_user(user):
+    return bool(user and user["role"] == ROLE_ADMIN)
+
+
 def is_authenticated(request):
     return verify_session(request.cookies.get(SESSION_COOKIE))
 
@@ -210,6 +264,15 @@ def is_authenticated(request):
 def require_login(request):
     if not is_authenticated(request):
         return RedirectResponse("/login", status_code=HTTPStatus.SEE_OTHER)
+    return None
+
+
+def require_admin(request):
+    redirect = require_login(request)
+    if redirect:
+        return redirect
+    if not is_admin_user(current_user(request)):
+        return RedirectResponse("/?error=forbidden", status_code=HTTPStatus.SEE_OTHER)
     return None
 
 
@@ -351,17 +414,53 @@ def group_comparisons(rows):
     return sorted(comparisons, key=lambda item: item["medicine"])
 
 
-def layout(title, body, authenticated=False, username=None):
-    login_link = (
-        (
-            f'<span class="nav-user">{escape(username or "")}</span>'
-            '<a class="nav-link" href="/perfil">Perfil</a>'
-            '<a class="nav-link" href="/usuarios">Usuarios</a>'
-            '<a class="nav-link" href="/logout">Cerrar sesion</a>'
+def user_initials(user):
+    if not user:
+        return "PM"
+    name = (user["full_name"] or user["email"] or "PM").strip()
+    parts = [part for part in re.split(r"\s+", name) if part]
+    if len(parts) >= 2:
+        return (parts[0][0] + parts[1][0]).upper()
+    return name[:2].upper()
+
+
+def layout(title, body, authenticated=False, user=None, active="dashboard"):
+    nav_items = []
+    if authenticated:
+        nav_items.extend(
+            [
+                ("/", "Dashboard", "dashboard"),
+                ("/perfil", "Perfil", "profile"),
+            ]
         )
-        if authenticated
-        else '<a class="nav-link" href="/login">Ingresar</a>'
+        if is_admin_user(user):
+            nav_items.extend(
+                [
+                    ("/admin", "Panel admin", "admin"),
+                    ("/usuarios", "Usuarios", "users"),
+                ]
+            )
+        nav_items.append(("/logout", "Cerrar sesion", "logout"))
+    else:
+        nav_items.append(("/login", "Ingresar", "login"))
+
+    nav_html = "".join(
+        f'<a class="nav-link {"active" if key == active else ""}" href="{href}">{label}</a>'
+        for href, label, key in nav_items
     )
+    user_card = ""
+    if authenticated and user:
+        role_label = "Administrador" if is_admin_user(user) else "Cliente"
+        user_card = f"""
+        <div class="user-card">
+            <div class="avatar">{escape(user_initials(user))}</div>
+            <div>
+                <strong>{escape(user["full_name"] or user["email"])}</strong>
+                <span>{escape(role_label)}</span>
+            </div>
+        </div>
+        """
+    app_shell_class = "app-shell" if authenticated else "public-shell"
     return f"""
     <!doctype html>
     <html lang="es">
@@ -372,64 +471,161 @@ def layout(title, body, authenticated=False, username=None):
         <style>
             :root {{
                 color-scheme: light;
-                --bg: #f4f7fb;
+                --bg: #eef6f7;
                 --surface: #ffffff;
-                --line: #dce3ec;
-                --text: #17212f;
-                --muted: #627083;
-                --brand: #0f766e;
-                --brand-dark: #115e59;
-                --warning: #8a6100;
-                --danger: #9f1239;
+                --surface-soft: #f8fbfc;
+                --line: #d9e7ea;
+                --text: #102331;
+                --muted: #627785;
+                --brand: #128277;
+                --brand-dark: #0d4f57;
+                --brand-soft: #dff6f2;
+                --accent: #2870c9;
+                --warning: #9a6a00;
+                --danger: #b4234b;
+                --shadow: 0 18px 45px rgba(16, 35, 49, 0.12);
             }}
             * {{ box-sizing: border-box; }}
             body {{
                 margin: 0;
-                background: var(--bg);
+                background:
+                    radial-gradient(circle at top left, rgba(18, 130, 119, 0.16), transparent 34%),
+                    linear-gradient(135deg, #eef6f7 0%, #f7fbfc 48%, #edf7f1 100%);
                 color: var(--text);
-                font-family: Arial, Helvetica, sans-serif;
+                font-family: Inter, Segoe UI, Arial, Helvetica, sans-serif;
             }}
-            header {{
-                background: var(--brand-dark);
+            a {{ color: var(--brand-dark); }}
+            .app-shell {{
+                display: grid;
+                grid-template-columns: 260px minmax(0, 1fr);
+                min-height: 100vh;
+            }}
+            .sidebar {{
+                background: linear-gradient(180deg, #0d4f57 0%, #0f6c65 100%);
                 color: white;
+                padding: 24px 18px;
+                position: sticky;
+                top: 0;
+                height: 100vh;
+            }}
+            .public-shell {{
+                min-height: 100vh;
+            }}
+            .public-header {{
+                background: rgba(255,255,255,0.82);
+                border-bottom: 1px solid var(--line);
+                backdrop-filter: blur(18px);
                 padding: 18px 28px;
             }}
-            .topbar {{
+            .brand {{
                 align-items: center;
                 display: flex;
-                justify-content: space-between;
-                margin: 0 auto;
-                max-width: 1240px;
-            }}
-            .brand {{
                 font-size: 24px;
-                font-weight: 700;
+                font-weight: 800;
+                gap: 10px;
                 letter-spacing: 0;
             }}
-            .nav-link {{
-                color: white;
-                font-size: 14px;
-                margin-left: 16px;
-                text-decoration: none;
+            .brand-mark {{
+                align-items: center;
+                background: #baf2df;
+                border-radius: 14px;
+                color: #073f46;
+                display: inline-flex;
+                font-size: 18px;
+                font-weight: 900;
+                height: 38px;
+                justify-content: center;
+                width: 38px;
             }}
-            .nav-user {{
-                color: #d8fffb;
-                font-size: 14px;
-                margin-right: 4px;
+            .brand small {{
+                color: #d9fffb;
+                display: block;
+                font-size: 12px;
+                font-weight: 500;
+                letter-spacing: 0;
+                margin-top: 3px;
+            }}
+            .nav-link {{
+                align-items: center;
+                border-radius: 8px;
+                color: rgba(255,255,255,0.86);
+                display: flex;
+                font-size: 15px;
+                font-weight: 700;
+                gap: 10px;
+                margin-top: 8px;
+                padding: 11px 12px;
+                text-decoration: none;
+                transition: background .18s ease, transform .18s ease;
+            }}
+            .nav-link:hover, .nav-link.active {{
+                background: rgba(255,255,255,0.15);
+                color: white;
+                transform: translateX(2px);
+            }}
+            .user-card {{
+                align-items: center;
+                background: rgba(255,255,255,0.12);
+                border: 1px solid rgba(255,255,255,0.18);
+                border-radius: 12px;
+                display: flex;
+                gap: 10px;
+                margin: 24px 0 18px;
+                padding: 12px;
+            }}
+            .user-card span {{
+                color: #c6f8f0;
+                display: block;
+                font-size: 12px;
+                margin-top: 2px;
+            }}
+            .avatar {{
+                align-items: center;
+                background: #e8fff8;
+                border-radius: 999px;
+                color: var(--brand-dark);
+                display: inline-flex;
+                flex: 0 0 auto;
+                font-weight: 900;
+                height: 42px;
+                justify-content: center;
+                width: 42px;
             }}
             main {{
                 margin: 0 auto;
                 max-width: 1240px;
-                padding: 24px;
+                padding: 28px;
             }}
-            h1 {{ font-size: 28px; margin: 0 0 6px; }}
+            .content {{ width: 100%; }}
+            h1 {{ font-size: 34px; margin: 0 0 8px; }}
             h2 {{ font-size: 20px; margin: 28px 0 12px; }}
             p {{ color: var(--muted); line-height: 1.5; }}
+            .hero {{
+                background:
+                    linear-gradient(120deg, rgba(13,79,87,.92), rgba(18,130,119,.82)),
+                    url("https://images.unsplash.com/photo-1587854692152-cbe660dbde88?auto=format&fit=crop&w=1400&q=80");
+                background-position: center;
+                background-size: cover;
+                border-radius: 18px;
+                box-shadow: var(--shadow);
+                color: white;
+                margin-bottom: 22px;
+                overflow: hidden;
+                padding: 34px;
+            }}
+            .hero p {{ color: rgba(255,255,255,0.86); max-width: 780px; }}
+            .hero h1 {{ font-size: 38px; }}
             .panel {{
                 background: var(--surface);
                 border: 1px solid var(--line);
-                border-radius: 8px;
-                padding: 18px;
+                border-radius: 12px;
+                box-shadow: 0 10px 30px rgba(16, 35, 49, 0.07);
+                padding: 20px;
+                transition: transform .18s ease, box-shadow .18s ease;
+            }}
+            .panel:hover {{
+                box-shadow: 0 16px 42px rgba(16, 35, 49, 0.11);
+                transform: translateY(-1px);
             }}
             .filters {{
                 display: grid;
@@ -439,16 +635,25 @@ def layout(title, body, authenticated=False, username=None):
             }}
             input, select, button, .button {{
                 border: 1px solid var(--line);
-                border-radius: 6px;
+                border-radius: 9px;
                 font: inherit;
                 min-height: 42px;
                 padding: 9px 12px;
             }}
+            input:focus, select:focus {{
+                border-color: var(--brand);
+                box-shadow: 0 0 0 4px rgba(18, 130, 119, .13);
+                outline: none;
+            }}
             button, .button {{
-                background: var(--brand);
+                background: linear-gradient(135deg, var(--brand), var(--accent));
                 border-color: var(--brand);
                 color: white;
                 cursor: pointer;
+                display: inline-flex;
+                font-weight: 800;
+                justify-content: center;
+                align-items: center;
                 text-decoration: none;
                 white-space: nowrap;
             }}
@@ -458,8 +663,10 @@ def layout(title, body, authenticated=False, username=None):
             }}
             table {{
                 background: white;
-                border: 1px solid var(--line);
                 border-collapse: collapse;
+                border-radius: 12px;
+                box-shadow: 0 8px 26px rgba(16, 35, 49, 0.07);
+                overflow: hidden;
                 width: 100%;
             }}
             th, td {{
@@ -468,7 +675,7 @@ def layout(title, body, authenticated=False, username=None):
                 text-align: left;
                 vertical-align: top;
             }}
-            th {{ background: #eaf3f2; font-size: 13px; }}
+            th {{ background: #eaf3f2; color: #274654; font-size: 13px; }}
             .price {{ font-weight: 700; white-space: nowrap; }}
             .muted {{ color: var(--muted); font-size: 13px; }}
             .badge {{
@@ -487,20 +694,42 @@ def layout(title, body, authenticated=False, username=None):
                 grid-template-columns: repeat(4, 1fr);
                 margin: 18px 0;
             }}
-            .summary strong {{ display: block; font-size: 24px; margin-top: 4px; }}
+            .summary strong {{ display: block; font-size: 28px; margin-top: 4px; }}
+            .quick-grid {{
+                display: grid;
+                gap: 14px;
+                grid-template-columns: repeat(3, 1fr);
+                margin: 18px 0;
+            }}
+            .section-head {{
+                align-items: center;
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+                margin: 22px 0 12px;
+            }}
             .login {{
                 margin: 56px auto;
                 max-width: 420px;
             }}
             .login form {{ display: grid; gap: 12px; }}
+            .back-row {{
+                display: flex;
+                gap: 10px;
+                margin-bottom: 16px;
+            }}
             .error {{ color: var(--danger); font-weight: 700; }}
             .success {{ color: #166534; font-weight: 700; }}
             @media (max-width: 900px) {{
-                .filters, .summary {{ grid-template-columns: 1fr; }}
+                .app-shell {{ grid-template-columns: 1fr; }}
+                .sidebar {{ height: auto; position: relative; }}
+                .filters, .summary, .quick-grid {{ grid-template-columns: 1fr; }}
                 main {{ padding: 16px; }}
+                .hero {{ padding: 24px; }}
+                .hero h1 {{ font-size: 30px; }}
             }}
             @media print {{
-                header, .filters, .actions, .nav-link {{ display: none; }}
+                .sidebar, .filters, .actions, .nav-link, .back-row {{ display: none; }}
                 body {{ background: white; }}
                 main {{ max-width: none; padding: 0; }}
                 .panel, table {{ border-color: #999; }}
@@ -509,31 +738,42 @@ def layout(title, body, authenticated=False, username=None):
         </style>
     </head>
     <body>
-        <header>
-            <div class="topbar">
-                <div class="brand">PrecioMed</div>
-                {login_link}
-            </div>
-        </header>
-        <main>{body}</main>
+        <div class="{app_shell_class}">
+            {'<aside class="sidebar"><div class="brand"><span class="brand-mark">PM</span><div>PrecioMed<small>Salud, datos y precios claros</small></div></div>' + user_card + '<nav>' + nav_html + '</nav></aside>' if authenticated else '<header class="public-header"><div class="brand"><span class="brand-mark">PM</span><div>PrecioMed</div></div></header>'}
+            <main class="content">{body}</main>
+        </div>
     </body>
     </html>
     """
 
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request, medicine: str = "", pharmacy: str = "", min_price: str = "", max_price: str = ""):
+def home(
+    request: Request,
+    medicine: str = "",
+    pharmacy: str = "",
+    min_price: str = "",
+    max_price: str = "",
+    error: str = "",
+):
     redirect = require_login(request)
     if redirect:
         return redirect
 
-    username = current_username(request)
+    user = current_user(request)
     rows = latest_rows()
     filtered_rows = apply_filters(rows, medicine, pharmacy, min_price, max_price)
     comparisons = group_comparisons(filtered_rows)
     pharmacies = sorted({row["pharmacy_name"] for row in rows})
     verified = sum(1 for row in filtered_rows if row["product_match_status"] == "ok")
     user_total = count_users()
+    admin = is_admin_user(user)
+    welcome_name = escape((user["full_name"] or user["email"]).split()[0])
+    forbidden_html = (
+        '<div class="panel error">No tienes permiso para entrar al panel administrativo.</div>'
+        if error == "forbidden"
+        else ""
+    )
 
     options = ['<option value="">Todas</option>']
     for item in pharmacies:
@@ -556,7 +796,7 @@ def home(request: Request, medicine: str = "", pharmacy: str = "", min_price: st
         <div class="panel">Medicamentos<strong>{len(comparisons)}</strong></div>
         <div class="panel">Registros<strong>{len(filtered_rows)}</strong></div>
         <div class="panel">Farmacias<strong>{len(pharmacies)}</strong></div>
-        <div class="panel">Usuarios<strong>{user_total}/{max_users_label()}</strong></div>
+        <div class="panel">{'Usuarios' if admin else 'Validados'}<strong>{f'{user_total}/{max_users_label()}' if admin else verified}</strong></div>
     </section>
     """
 
@@ -618,18 +858,32 @@ def home(request: Request, medicine: str = "", pharmacy: str = "", min_price: st
             """
         )
 
+    quick_links = f"""
+    <section class="quick-grid">
+        <a class="panel" href="#buscar"><strong>Buscar medicamento</strong><p>Filtra por nombre, farmacia y rango de precio.</p></a>
+        <a class="panel" href="/perfil"><strong>Mi perfil</strong><p>Edita tu seguridad y revisa tus accesos recientes.</p></a>
+        {'<a class="panel" href="/admin"><strong>Panel admin</strong><p>Usuarios, logs, seguridad y datos del sistema.</p></a>' if admin else '<a class="panel" href="#comparaciones"><strong>Comparar precios</strong><p>Encuentra la farmacia con mejor valor disponible.</p></a>'}
+    </section>
+    """
+
     body = f"""
-    <h1>Dashboard de medicamentos</h1>
-    <p>Consulta precios publicados por farmacia, valida coincidencias y compara el mejor precio disponible.</p>
+    <section class="hero">
+        <h1>Hola, {welcome_name}. Compara medicamentos con claridad.</h1>
+        <p>Busca productos, revisa farmacias y encuentra el mejor precio publicado sin perder de vista la validacion de coincidencia.</p>
+    </section>
+    {forbidden_html}
     <div class="actions">
-        <a class="button" href="/actualizar">Actualizar precios</a>
+        {'<a class="button" href="/actualizar">Actualizar precios</a>' if admin else ''}
         <button onclick="window.print()">Imprimir vista</button>
     </div>
+    {quick_links}
+    <div id="buscar"></div>
     {filters}
     {summary}
+    <div id="comparaciones"></div>
     {"".join(sections) if sections else '<div class="panel">No hay resultados con esos filtros.</div>'}
     """
-    return HTMLResponse(layout("Dashboard", body, authenticated=True, username=username))
+    return HTMLResponse(layout("Dashboard", body, authenticated=True, user=user, active="dashboard"))
 
 
 @app.head("/")
@@ -785,7 +1039,8 @@ def register_user(
     if validate_password_strength(password):
         return RedirectResponse("/registro?error=weak", status_code=HTTPStatus.SEE_OTHER)
 
-    create_user(username, full_name, email, hash_password(password))
+    role = role_for_email(email)
+    create_user(username, full_name, email, hash_password(password), role)
     log_activity(
         "register",
         username=username,
@@ -818,12 +1073,26 @@ def profile_form(request: Request, error: str = "", success: str = ""):
     }
     error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
     success_html = '<p class="success">Contrasena actualizada correctamente.</p>' if success else ""
+    activity_rows = fetch_activity_logs_by_email(user["email"])
+    activity_html = "".join(
+        f"""
+        <tr>
+            <td>{escape(row["created_at"][:19])}</td>
+            <td>{escape(row["event_type"])}</td>
+            <td>{escape(row["status"])}</td>
+            <td>{escape(row["message"] or "")}</td>
+        </tr>
+        """
+        for row in activity_rows
+    )
     body = f"""
+    <div class="back-row"><a class="button secondary" href="/">Volver al Dashboard</a></div>
     <h1>Perfil de usuario</h1>
-    <section class="panel login">
+    <section class="panel">
         <h2>Datos de la cuenta</h2>
         <p><strong>Nombre:</strong> {escape(user["full_name"] or "")}</p>
         <p><strong>Correo:</strong> {escape(user["email"] or "")}</p>
+        <p><strong>Rol:</strong> {escape('Administrador' if is_admin_user(user) else 'Cliente')}</p>
     </section>
     <section class="panel login">
         <h2>Cambiar contrasena</h2>
@@ -837,8 +1106,15 @@ def profile_form(request: Request, error: str = "", success: str = ""):
         </form>
         <p class="muted">Usa minimo 8 caracteres con mayuscula, minuscula y numero.</p>
     </section>
+    <section>
+        <h2>Mi actividad reciente</h2>
+        <table>
+            <thead><tr><th>Fecha</th><th>Evento</th><th>Estado</th><th>Mensaje</th></tr></thead>
+            <tbody>{activity_html or '<tr><td colspan="4">Sin actividad reciente.</td></tr>'}</tbody>
+        </table>
+    </section>
     """
-    return HTMLResponse(layout("Perfil", body, authenticated=True, username=user["email"]))
+    return HTMLResponse(layout("Perfil", body, authenticated=True, user=user, active="profile"))
 
 
 @app.post("/perfil/cambiar-contrasena")
@@ -1067,26 +1343,27 @@ def save_new_password(
 
 @app.get("/usuarios", response_class=HTMLResponse)
 def users_view(request: Request):
-    redirect = require_login(request)
+    redirect = require_admin(request)
     if redirect:
         return redirect
 
-    username = current_username(request)
+    user = current_user(request)
     user_rows = fetch_users()
     log_rows = fetch_activity_logs()
 
     users_html = []
-    for user in user_rows:
-        status = "Activo" if user["is_active"] else "Inactivo"
+    for account in user_rows:
+        status = "Activo" if account["is_active"] else "Inactivo"
         users_html.append(
             f"""
             <tr>
-                <td>{escape(user["full_name"] or "")}</td>
-                <td>{escape(user["username"])}</td>
-                <td>{escape(user["email"] or "")}</td>
+                <td>{escape(account["full_name"] or "")}</td>
+                <td>{escape(account["username"])}</td>
+                <td>{escape(account["email"] or "")}</td>
+                <td>{escape(account["role"])}</td>
                 <td>{status}</td>
-                <td>{escape(user["created_at"][:19])}</td>
-                <td>{escape((user["last_login_at"] or "")[:19])}</td>
+                <td>{escape(account["created_at"][:19])}</td>
+                <td>{escape((account["last_login_at"] or "")[:19])}</td>
             </tr>
             """
         )
@@ -1118,6 +1395,7 @@ def users_view(request: Request):
                     <th>Nombre completo</th>
                     <th>Usuario</th>
                     <th>Correo</th>
+                    <th>Rol</th>
                     <th>Estado</th>
                     <th>Creado</th>
                     <th>Ultimo ingreso</th>
@@ -1144,12 +1422,78 @@ def users_view(request: Request):
         </table>
     </section>
     """
-    return HTMLResponse(layout("Usuarios", body, authenticated=True, username=username))
+    return HTMLResponse(layout("Usuarios", body, authenticated=True, user=user, active="users"))
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard(request: Request):
+    redirect = require_admin(request)
+    if redirect:
+        return redirect
+
+    user = current_user(request)
+    rows = latest_rows()
+    user_rows = fetch_users()
+    log_rows = fetch_activity_logs(12)
+    admin_total = sum(1 for item in user_rows if item["role"] == ROLE_ADMIN)
+    client_total = sum(1 for item in user_rows if item["role"] == ROLE_CLIENT)
+    pharmacies = sorted({row["pharmacy_name"] for row in rows})
+    medicines = sorted({row["search_name"] for row in rows})
+
+    log_html = "".join(
+        f"""
+        <tr>
+            <td>{escape(row["created_at"][:19])}</td>
+            <td>{escape(row["event_type"])}</td>
+            <td>{escape(row["email"] or "")}</td>
+            <td>{escape(row["status"])}</td>
+            <td>{escape(row["message"] or "")}</td>
+        </tr>
+        """
+        for row in log_rows
+    )
+    medicine_html = "".join(f"<li>{escape(item)}</li>" for item in medicines[:12])
+    pharmacy_html = "".join(f"<li>{escape(item)}</li>" for item in pharmacies)
+
+    body = f"""
+    <div class="back-row"><a class="button secondary" href="/">Volver al Dashboard</a></div>
+    <section class="hero">
+        <h1>Panel administrativo</h1>
+        <p>Controla usuarios, actividad, seguridad, medicamentos y farmacias sin exponer informacion administrativa a clientes.</p>
+    </section>
+    <section class="summary">
+        <div class="panel">Usuarios activos<strong>{count_users()}</strong></div>
+        <div class="panel">Administradores<strong>{admin_total}</strong></div>
+        <div class="panel">Clientes<strong>{client_total}</strong></div>
+        <div class="panel">Farmacias<strong>{len(pharmacies)}</strong></div>
+    </section>
+    <section class="quick-grid">
+        <a class="panel" href="/usuarios"><strong>Usuarios y logs</strong><p>Ver registros, inicios de sesion y actividad.</p></a>
+        <a class="panel" href="/actualizar"><strong>Actualizar precios</strong><p>Ejecutar scraper y refrescar comparaciones.</p></a>
+        <a class="panel" href="/"><strong>Vista de precios</strong><p>Revisar dashboard principal de medicamentos.</p></a>
+    </section>
+    <section class="quick-grid">
+        <div class="panel"><h2>Medicamentos</h2><ul>{medicine_html or '<li>Sin datos.</li>'}</ul></div>
+        <div class="panel"><h2>Farmacias</h2><ul>{pharmacy_html or '<li>Sin datos.</li>'}</ul></div>
+        <div class="panel"><h2>Seguridad</h2><p>Roles activos: admin y cliente. Los clientes no pueden entrar a este panel ni a usuarios.</p></div>
+    </section>
+    <section>
+        <div class="section-head">
+            <h2>Actividad reciente</h2>
+            <a class="button secondary" href="/usuarios">Ver todo</a>
+        </div>
+        <table>
+            <thead><tr><th>Fecha</th><th>Evento</th><th>Correo</th><th>Estado</th><th>Mensaje</th></tr></thead>
+            <tbody>{log_html or '<tr><td colspan="5">Sin actividad reciente.</td></tr>'}</tbody>
+        </table>
+    </section>
+    """
+    return HTMLResponse(layout("Admin", body, authenticated=True, user=user, active="admin"))
 
 
 @app.get("/actualizar")
 def actualizar(request: Request):
-    redirect = require_login(request)
+    redirect = require_admin(request)
     if redirect:
         return redirect
     run_scraper()
