@@ -166,7 +166,7 @@ def fetch_latest_prices():
                 SELECT
                     product_id,
                     pharmacy_id,
-                    MAX(observed_at) AS latest_observed_at
+                    MAX(id) AS latest_observation_id
                 FROM price_observations
                 GROUP BY product_id, pharmacy_id
             )
@@ -185,9 +185,7 @@ def fetch_latest_prices():
                 po.observed_at
             FROM latest l
             JOIN price_observations po
-                ON po.product_id = l.product_id
-                AND po.pharmacy_id = l.pharmacy_id
-                AND po.observed_at = l.latest_observed_at
+                ON po.id = l.latest_observation_id
             JOIN products p ON p.id = po.product_id
             JOIN pharmacies ph ON ph.id = po.pharmacy_id
             ORDER BY p.search_name, po.price_cop ASC

@@ -1,125 +1,141 @@
-# Comparador de precios de farmacias
+# PrecioMed
 
-Proyecto base en Python para recolectar precios de productos de farmacias, guardarlos en una base de datos y mostrarlos en una pagina web.
+PrecioMed es una aplicacion web para comparar precios publicados de medicamentos en Farmatodo, Cruz Verde y Colsubsidio.
 
-## Que hace este proyecto
+La version principal usada para organizar este repositorio fue `upload-preciomed`, porque era la carpeta mas actualizada.
 
-- Guarda productos, farmacias y precios en una base de datos SQLite.
-- Ejecuta un scraper de ejemplo para probar el flujo completo sin depender todavia de paginas reales.
-- Permite agregar scrapers reales farmacia por farmacia.
-- Muestra una pagina web local con la comparacion de precios.
-- Valida si el producto encontrado parece ser el mismo producto del enlace.
-- Guarda precio con descuento, precio antes y porcentaje de descuento cuando la pagina lo permite.
-- Incluye una ejecucion periodica sencilla para actualizar precios cada cierto tiempo.
+## Funcionalidades
 
-## Estructura
+- Login basico de usuario.
+- Cookie de sesion firmada con clave secreta.
+- Dashboard de medicamentos.
+- Filtros por medicamento, farmacia, precio minimo y precio maximo.
+- Comparacion por medicamento entre farmacias.
+- Validacion de coincidencia del producto encontrado contra la URL esperada.
+- Vista imprimible desde el boton `Imprimir vista`.
+- Actualizacion manual de precios desde el boton `Actualizar precios`.
+- Base de datos SQLite.
+
+## Usuario inicial
+
+Para desarrollo local:
 
 ```text
-
-├── app.py                  # Pagina web local
-├── config.py               # Configuracion general
-├── database.py             # Conexion y tablas de la base de datos
-├── requirements.txt        # Librerias necesarias
-├── run_scraper.py          # Ejecuta el scraper una vez
-├── scheduler.py            # Ejecuta el scraper periodicamente
-├── data/
-│   └── products.csv        # Productos que quieres comparar
-│   └── product_sources.csv # URLs reales que se van a consultar
-└── scrapers/
-    ├── base.py             # Modelo comun para scrapers
-    ├── product_page.py     # Scraper de paginas de producto
-    ├── farmatodo.py        # Filtro de Farmatodo
-    ├── cruz_verde.py       # Filtro de Cruz Verde
-    └── colsubsidio.py      # Filtro de Colsubsidio
+Usuario: admin
+Contrasena: preciomed123
 ```
 
-## Primeros pasos
+En Render se recomienda configurar variables de entorno:
 
-1. Crear un entorno virtual:
+```text
+PRECIOMED_USERNAME=admin
+PRECIOMED_PASSWORD_HASH=<hash sha256 de tu contrasena>
+PRECIOMED_SECRET_KEY=<clave larga aleatoria>
+```
+
+Si no defines `PRECIOMED_PASSWORD_HASH`, se usa la contrasena inicial de desarrollo.
+
+## Instalar dependencias
 
 ```powershell
 python -m venv .venv
-```
-
-2. Activarlo:
-
-```powershell
 .\.venv\Scripts\Activate.ps1
-```
-
-3. Instalar dependencias:
-
-```powershell
 pip install -r requirements.txt
 ```
 
-4. Ejecutar el scraper:
+## Ejecutar localmente
 
 ```powershell
-python run_scraper.py
+python start.py
 ```
 
-5. Abrir la pagina web:
-
-```powershell
-python app.py
-```
-
-Luego entra en el navegador a:
+Luego abre:
 
 ```text
 http://127.0.0.1:5000
 ```
 
-## Modelo de ejecucion recomendado
+Tambien puedes usar Uvicorn directamente:
 
-1. Edita `data/product_sources.csv` y revisa que cada fila apunte al producto exacto que quieres comparar.
-2. Ejecuta `python run_scraper.py` para visitar cada enlace y guardar la ultima observacion.
-3. Abre `python app.py` y entra a `http://127.0.0.1:5000`.
-4. Revisa la columna `Validacion`:
-   - `OK`: el nombre encontrado coincide con el enlace esperado.
-   - `Revisar`: faltan datos para confirmar que sea exactamente igual.
-   - `Diferente`: faltan datos clave como dosis, cantidad o tokens del producto.
-5. Si una farmacia muestra `Diferente`, cambia esa URL en `data/product_sources.csv` por el enlace correcto.
+```powershell
+uvicorn app:app --host 0.0.0.0 --port 5000
+```
 
-La interfaz muestra:
+## Actualizar precios
 
-- Producto encontrado.
-- Precio con descuento detectado.
-- Precio antes, si la pagina publica precio tachado o precio de lista.
-- Porcentaje de descuento calculado.
-- Nota de validacion del producto.
-
-Para que la comparacion sea justa, usa enlaces con la misma dosis y presentacion. Por ejemplo, no mezcles una caja x 30 con un blister x 10.
-
-## Compartir con otras personas
-
-El link `http://127.0.0.1:5000` solo funciona en tu computador. Para que otras personas puedan verlo desde sus casas, revisa la guia:
+Desde la app, entra con login y usa el boton:
 
 ```text
-PUBLICAR.md
+Actualizar precios
 ```
 
-## Como se adapta a farmacias reales
+O desde terminal:
 
-El archivo `data/product_sources.csv` contiene las paginas reales que el scraper visita. Cada fila tiene:
-
-```csv
-pharmacy_name,pharmacy_website,search_name,product_url
+```powershell
+python run_scraper.py
 ```
 
-Si quieres agregar otro producto, primero agregas el producto a `data/products.csv` y luego agregas una URL real de cada farmacia en `data/product_sources.csv`.
+## Exportar datos a CSV
 
-Importante: antes de scrapear una pagina real hay que revisar sus terminos de uso y su `robots.txt`. Para un proyecto universitario es mejor hacer pocas solicitudes, con pausas, y guardar la fecha de consulta.
+```powershell
+python export_prices.py
+```
 
-## Farmacias objetivo
+El archivo queda en:
 
-Las fuentes iniciales quedan registradas en `data/pharmacies.csv`:
+```text
+data/latest_prices.csv
+```
 
-- Farmatodo: `https://www.farmatodo.com.co/`
-- Cruz Verde: `https://www.cruzverde.com.co/`
-- Redeban: queda en estado `review`, porque no parece ser farmacia sino una empresa de soluciones de pago.
+## Estructura
 
-## Siguiente paso recomendado
+```text
+.
+├── app.py
+├── config.py
+├── database.py
+├── export_prices.py
+├── run_scraper.py
+├── start.py
+├── requirements.txt
+├── render.yaml
+├── data/
+│   ├── products.csv
+│   ├── product_sources.csv
+│   ├── pharmacies.csv
+│   └── prices.sqlite3
+└── scrapers/
+    ├── base.py
+    ├── product_page.py
+    ├── farmatodo.py
+    ├── cruz_verde.py
+    └── colsubsidio.py
+```
 
-Escoge 2 o 3 farmacias y 5 productos iniciales. Con eso se puede crear el primer scraper real sin hacer el proyecto demasiado grande desde el comienzo.
+## Limpieza realizada
+
+Los archivos duplicados, temporales, logs y versiones antiguas fueron movidos a:
+
+```text
+backup_antiguo/
+```
+
+No se borro informacion importante sin respaldo.
+
+## Render
+
+En Render usa:
+
+```text
+Build Command:
+pip install -r requirements.txt
+
+Start Command:
+uvicorn app:app --host 0.0.0.0 --port $PORT
+```
+
+El archivo `render.yaml` ya incluye esa configuracion.
+
+## Nota academica
+
+PrecioMed compara precios publicados por farmacias. No recomienda automedicacion ni reemplaza la orientacion de un profesional de salud.
