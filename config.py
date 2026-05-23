@@ -13,3 +13,5 @@ SCRAPER_INTERVAL_MINUTES = 60
 
 # Identifica tu proyecto con educacion y respeto al sitio consultado.
 USER_AGENT = "University price comparison project contact: student@example.com"
+MAX_USERS = int(os.environ.get("MAX_USERS", "100000"))
+
