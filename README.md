@@ -112,6 +112,14 @@ data/latest_prices.csv
     └── colsubsidio.py
 ```
 
+## Guia para aprender el codigo
+
+La explicacion completa del proyecto, la interfaz, el login, el registro de inicios y el limite de usuarios esta en:
+
+```text
+GUIA_BASICA.md
+```
+
 ## Limpieza realizada
 
 Los archivos duplicados, temporales, logs y versiones antiguas fueron movidos a:

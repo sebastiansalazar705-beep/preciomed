@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import os
-from datetime import datetime
+import socket
 from http import HTTPStatus
 from html import escape
 from urllib.parse import urlencode
@@ -9,7 +9,18 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from database import fetch_latest_prices, init_db
+from config import MAX_USERS
+from database import (
+    count_users,
+    create_user,
+    ensure_default_user,
+    fetch_app_start_logs,
+    fetch_latest_prices,
+    fetch_users,
+    get_user_by_username,
+    init_db,
+    log_app_start,
+)
 from run_scraper import run as run_scraper
 
 
@@ -19,6 +30,36 @@ DEFAULT_PASSWORD = "preciomed123"
 SESSION_COOKIE = "preciomed_session"
 
 app = FastAPI(title=APP_NAME)
+
+
+def machine_identifier():
+    hostname = socket.gethostname()
+    try:
+        ip_address = socket.gethostbyname(hostname)
+        return f"{hostname} ({ip_address})"
+    except OSError:
+        return hostname
+
+
+@app.on_event("startup")
+def startup_event():
+    try:
+        init_db()
+        ensure_default_user(get_admin_username(), get_password_hash())
+        log_app_start(
+            username=None,
+            ip_identifier=machine_identifier(),
+            status="exitoso",
+            error_message="Aplicacion iniciada correctamente.",
+        )
+    except Exception as error:
+        log_app_start(
+            username=None,
+            ip_identifier=machine_identifier(),
+            status="error",
+            error_message=str(error),
+        )
+        raise
 
 
 def get_secret_key():
@@ -49,12 +90,26 @@ def sign_session(username):
     return f"{username}:{signature}"
 
 
-def verify_session(cookie_value):
+def current_username_from_cookie(cookie_value):
     if not cookie_value or ":" not in cookie_value:
-        return False
+        return None
     username, signature = cookie_value.split(":", 1)
     expected = sign_session(username).split(":", 1)[1]
-    return username == get_admin_username() and hmac.compare_digest(signature, expected)
+    if not hmac.compare_digest(signature, expected):
+        return None
+
+    user = get_user_by_username(username)
+    if not user or not user["is_active"]:
+        return None
+    return username
+
+
+def verify_session(cookie_value):
+    return current_username_from_cookie(cookie_value) is not None
+
+
+def current_username(request):
+    return current_username_from_cookie(request.cookies.get(SESSION_COOKIE))
 
 
 def is_authenticated(request):
@@ -142,9 +197,13 @@ def group_comparisons(rows):
     return sorted(comparisons, key=lambda item: item["medicine"])
 
 
-def layout(title, body, authenticated=False):
+def layout(title, body, authenticated=False, username=None):
     login_link = (
-        '<a class="nav-link" href="/logout">Cerrar sesion</a>'
+        (
+            f'<span class="nav-user">{escape(username or "")}</span>'
+            '<a class="nav-link" href="/usuarios">Usuarios</a>'
+            '<a class="nav-link" href="/logout">Cerrar sesion</a>'
+        )
         if authenticated
         else '<a class="nav-link" href="/login">Ingresar</a>'
     )
@@ -195,7 +254,13 @@ def layout(title, body, authenticated=False):
             .nav-link {{
                 color: white;
                 font-size: 14px;
+                margin-left: 16px;
                 text-decoration: none;
+            }}
+            .nav-user {{
+                color: #d8fffb;
+                font-size: 14px;
+                margin-right: 4px;
             }}
             main {{
                 margin: 0 auto;
@@ -274,6 +339,7 @@ def layout(title, body, authenticated=False):
             }}
             .login form {{ display: grid; gap: 12px; }}
             .error {{ color: var(--danger); font-weight: 700; }}
+            .success {{ color: #166534; font-weight: 700; }}
             @media (max-width: 900px) {{
                 .filters, .summary {{ grid-template-columns: 1fr; }}
                 main {{ padding: 16px; }}
@@ -306,11 +372,13 @@ def home(request: Request, medicine: str = "", pharmacy: str = "", min_price: st
     if redirect:
         return redirect
 
+    username = current_username(request)
     rows = latest_rows()
     filtered_rows = apply_filters(rows, medicine, pharmacy, min_price, max_price)
     comparisons = group_comparisons(filtered_rows)
     pharmacies = sorted({row["pharmacy_name"] for row in rows})
     verified = sum(1 for row in filtered_rows if row["product_match_status"] == "ok")
+    user_total = count_users()
 
     options = ['<option value="">Todas</option>']
     for item in pharmacies:
@@ -333,7 +401,7 @@ def home(request: Request, medicine: str = "", pharmacy: str = "", min_price: st
         <div class="panel">Medicamentos<strong>{len(comparisons)}</strong></div>
         <div class="panel">Registros<strong>{len(filtered_rows)}</strong></div>
         <div class="panel">Farmacias<strong>{len(pharmacies)}</strong></div>
-        <div class="panel">Verificados<strong>{verified}</strong></div>
+        <div class="panel">Usuarios<strong>{user_total}/{MAX_USERS}</strong></div>
     </section>
     """
 
@@ -406,7 +474,7 @@ def home(request: Request, medicine: str = "", pharmacy: str = "", min_price: st
     {summary}
     {"".join(sections) if sections else '<div class="panel">No hay resultados con esos filtros.</div>'}
     """
-    return HTMLResponse(layout("Dashboard", body, authenticated=True))
+    return HTMLResponse(layout("Dashboard", body, authenticated=True, username=username))
 
 
 @app.head("/")
@@ -429,6 +497,7 @@ def login_form(request: Request, error: str = ""):
             <input name="password" type="password" placeholder="Contrasena" autocomplete="current-password" required>
             <button type="submit">Ingresar</button>
         </form>
+        <p><a href="/registro">Crear usuario nuevo</a></p>
         <p class="muted">Usuario inicial: admin. Contrasena inicial: preciomed123. Cambialos en Render con variables de entorno.</p>
     </section>
     """
@@ -436,12 +505,28 @@ def login_form(request: Request, error: str = ""):
 
 
 @app.post("/login")
-def login(username: str = Form(...), password: str = Form(...)):
-    valid_user = hmac.compare_digest(username, get_admin_username())
-    valid_password = hmac.compare_digest(hash_password(password), get_password_hash())
-    if not valid_user or not valid_password:
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    user = get_user_by_username(username)
+    valid_password = (
+        user
+        and user["is_active"]
+        and hmac.compare_digest(hash_password(password), user["password_hash"])
+    )
+    if not valid_password:
+        log_app_start(
+            username=username,
+            ip_identifier=request.client.host if request.client else None,
+            status="error",
+            error_message="Intento de login fallido.",
+        )
         return RedirectResponse("/login?error=1", status_code=HTTPStatus.SEE_OTHER)
 
+    log_app_start(
+        username=username,
+        ip_identifier=request.client.host if request.client else None,
+        status="exitoso",
+        error_message="Inicio de sesion exitoso.",
+    )
     response = RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
     response.set_cookie(
         SESSION_COOKIE,
@@ -454,11 +539,128 @@ def login(username: str = Form(...), password: str = Form(...)):
     return response
 
 
+@app.get("/registro", response_class=HTMLResponse)
+def register_form(request: Request, error: str = "", success: str = ""):
+    if is_authenticated(request):
+        return RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
+
+    error_messages = {
+        "max": "Se alcanzó el número máximo de usuarios permitidos.",
+        "exists": "Ese usuario ya existe.",
+        "short": "La contrasena debe tener al menos 8 caracteres.",
+    }
+    error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
+    success_html = '<p class="success">Usuario creado. Ya puedes iniciar sesion.</p>' if success else ""
+    body = f"""
+    <section class="panel login">
+        <h1>Crear usuario</h1>
+        <p>Usuarios registrados: {count_users()} de {MAX_USERS} permitidos.</p>
+        {error_html}
+        {success_html}
+        <form method="post" action="/registro">
+            <input name="username" placeholder="Usuario" autocomplete="username" required>
+            <input name="password" type="password" placeholder="Contrasena" autocomplete="new-password" required>
+            <button type="submit">Crear usuario</button>
+        </form>
+        <p><a href="/login">Volver al login</a></p>
+    </section>
+    """
+    return HTMLResponse(layout("Registro", body))
+
+
+@app.post("/registro")
+def register_user(request: Request, username: str = Form(...), password: str = Form(...)):
+    username = username.strip()
+    if count_users() >= MAX_USERS:
+        return RedirectResponse("/registro?error=max", status_code=HTTPStatus.SEE_OTHER)
+    if get_user_by_username(username):
+        return RedirectResponse("/registro?error=exists", status_code=HTTPStatus.SEE_OTHER)
+    if len(password) < 8:
+        return RedirectResponse("/registro?error=short", status_code=HTTPStatus.SEE_OTHER)
+
+    create_user(username, hash_password(password))
+    log_app_start(
+        username=username,
+        ip_identifier=request.client.host if request.client else None,
+        status="exitoso",
+        error_message="Usuario registrado correctamente.",
+    )
+    return RedirectResponse("/registro?success=1", status_code=HTTPStatus.SEE_OTHER)
+
+
 @app.get("/logout")
 def logout():
     response = RedirectResponse("/login", status_code=HTTPStatus.SEE_OTHER)
     response.delete_cookie(SESSION_COOKIE)
     return response
+
+
+@app.get("/usuarios", response_class=HTMLResponse)
+def users_view(request: Request):
+    redirect = require_login(request)
+    if redirect:
+        return redirect
+
+    username = current_username(request)
+    user_rows = fetch_users()
+    log_rows = fetch_app_start_logs()
+
+    users_html = []
+    for user in user_rows:
+        status = "Activo" if user["is_active"] else "Inactivo"
+        users_html.append(
+            f"""
+            <tr>
+                <td>{escape(user["username"])}</td>
+                <td>{status}</td>
+                <td>{escape(user["created_at"][:19])}</td>
+            </tr>
+            """
+        )
+
+    logs_html = []
+    for log in log_rows:
+        logs_html.append(
+            f"""
+            <tr>
+                <td>{escape(log["started_at"][:19])}</td>
+                <td>{escape(log["username"] or "Sistema")}</td>
+                <td>{escape(log["ip_identifier"] or "No detectado")}</td>
+                <td>{escape(log["status"])}</td>
+                <td>{escape(log["error_message"] or "")}</td>
+            </tr>
+            """
+        )
+
+    body = f"""
+    <h1>Usuarios y registros de inicio</h1>
+    <p>Usuarios registrados: {count_users()} de {MAX_USERS} permitidos.</p>
+    <section>
+        <h2>Usuarios</h2>
+        <table>
+            <thead>
+                <tr><th>Usuario</th><th>Estado</th><th>Creado</th></tr>
+            </thead>
+            <tbody>{"".join(users_html)}</tbody>
+        </table>
+    </section>
+    <section>
+        <h2>Registro de inicios</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Fecha y hora</th>
+                    <th>Usuario</th>
+                    <th>IP / equipo</th>
+                    <th>Estado</th>
+                    <th>Mensaje</th>
+                </tr>
+            </thead>
+            <tbody>{"".join(logs_html)}</tbody>
+        </table>
+    </section>
+    """
+    return HTMLResponse(layout("Usuarios", body, authenticated=True, username=username))
 
 
 @app.get("/actualizar")

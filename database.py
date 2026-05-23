@@ -49,6 +49,23 @@ def init_db():
                 FOREIGN KEY (pharmacy_id) REFERENCES pharmacies(id),
                 FOREIGN KEY (product_id) REFERENCES products(id)
             );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_start_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                username TEXT,
+                ip_identifier TEXT,
+                status TEXT NOT NULL,
+                error_message TEXT
+            );
             """
         )
         ensure_price_observation_columns(connection)
@@ -75,6 +92,107 @@ def ensure_price_observation_columns(connection):
     for column_name, sql in migrations.items():
         if column_name not in existing_columns:
             connection.execute(sql)
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_default_user(username, password_hash):
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row:
+            return row["id"]
+
+        connection.execute(
+            """
+            INSERT INTO users (username, password_hash, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (username, password_hash, utc_now()),
+        )
+        return connection.execute(
+            "SELECT id FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()["id"]
+
+
+def count_users():
+    with get_connection() as connection:
+        return connection.execute(
+            "SELECT COUNT(*) AS total FROM users WHERE is_active = 1"
+        ).fetchone()["total"]
+
+
+def fetch_users():
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, username, is_active, created_at
+            FROM users
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+
+
+def get_user_by_username(username):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, username, password_hash, is_active, created_at
+            FROM users
+            WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+
+
+def create_user(username, password_hash):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO users (username, password_hash, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (username, password_hash, utc_now()),
+        )
+        return connection.execute(
+            "SELECT id FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()["id"]
+
+
+def log_app_start(username=None, ip_identifier=None, status="exitoso", error_message=None):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO app_start_logs (
+                started_at,
+                username,
+                ip_identifier,
+                status,
+                error_message
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (utc_now(), username, ip_identifier, status, error_message),
+        )
+
+
+def fetch_app_start_logs(limit=30):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, started_at, username, ip_identifier, status, error_message
+            FROM app_start_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
 
 def upsert_pharmacy(name, website=None):
