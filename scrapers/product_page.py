@@ -2,14 +2,20 @@ import csv
 import gzip
 import json
 import re
-import time
+import unicodedata
 import zlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from urllib.parse import quote, unquote, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from config import PRODUCT_SOURCES_CSV, USER_AGENT
+from config import (
+    PRODUCT_SOURCES_CSV,
+    SCRAPER_MAX_WORKERS,
+    SCRAPER_REQUEST_TIMEOUT,
+    USER_AGENT,
+)
 from scrapers.base import ScrapedPrice
 
 
@@ -59,7 +65,7 @@ def fetch_html(url):
             "Accept-Encoding": "identity",
         },
     )
-    with urlopen(request, timeout=20) as response:
+    with urlopen(request, timeout=SCRAPER_REQUEST_TIMEOUT) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         body = response.read()
         encoding = response.headers.get("Content-Encoding", "").lower()
@@ -84,17 +90,9 @@ def clean_text(value):
 
 def normalize_text(value):
     value = unquote(value or "").lower()
-    replacements = str.maketrans(
-        {
-            "á": "a",
-            "é": "e",
-            "í": "i",
-            "ó": "o",
-            "ú": "u",
-            "ñ": "n",
-        }
-    )
-    return value.translate(replacements)
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(character for character in value if not unicodedata.combining(character))
+    return SPACE_PATTERN.sub(" ", value).strip()
 
 
 def tokens_from_text(value):
@@ -137,9 +135,18 @@ def validate_product_match(source, product_name):
     expected_name = expected_name_from_source(source)
     expected_tokens = important_tokens(expected_name)
     found_tokens = important_tokens(product_name)
+    brand_tokens = important_tokens(source.get("brand") or "")
 
     if not expected_tokens:
         return "review", 0, "No hay suficientes datos del producto esperado."
+
+    if brand_tokens and not brand_tokens <= found_tokens:
+        missing_brand = sorted(brand_tokens - found_tokens)
+        return (
+            "different",
+            0,
+            "Marca esperada no coincide: " + ", ".join(missing_brand),
+        )
 
     matching_tokens = expected_tokens & found_tokens
     score = round((len(matching_tokens) / len(expected_tokens)) * 100)
@@ -329,61 +336,75 @@ def choose_colsubsidio_product(source, products):
             return product
 
     expected_tokens = important_tokens(expected_name_from_source(source))
+    brand_tokens = important_tokens(source.get("brand") or "")
     scored_products = []
     for product in products:
         product_tokens = important_tokens(product.get("productName", ""))
+        if brand_tokens and not brand_tokens <= product_tokens:
+            continue
         score = len(expected_tokens & product_tokens)
         scored_products.append((score, product))
+    if not scored_products:
+        return products[0]
     scored_products.sort(key=lambda item: item[0], reverse=True)
     return scored_products[0][1]
 
 
+def scrape_source(source):
+    if is_colsubsidio_source(source):
+        return scrape_colsubsidio(source)
+
+    html = fetch_html(source["product_url"])
+    product_name = extract_product_name(
+        html,
+        source["search_name"],
+        source.get("product_name_hint"),
+    )
+    price_cop, list_price_cop, discount_percent = extract_price_pair(html)
+
+    if price_cop is None:
+        print(f"No encontre precio en: {source['product_url']}")
+        return None
+
+    match_status, match_score, match_notes = validate_product_match(
+        source,
+        product_name,
+    )
+
+    return ScrapedPrice(
+        pharmacy_name=source["pharmacy_name"],
+        pharmacy_website=source["pharmacy_website"],
+        search_name=source["search_name"],
+        product_name=product_name,
+        price_cop=price_cop,
+        list_price_cop=list_price_cop,
+        discount_percent=discount_percent,
+        product_match_status=match_status,
+        product_match_score=match_score,
+        match_notes=match_notes,
+        product_url=source["product_url"],
+    )
+
+
 def scrape(products=None):
     results = []
+    sources = load_sources()
+    max_workers = max(1, min(SCRAPER_MAX_WORKERS, len(sources) or 1))
 
-    for source in load_sources():
-        try:
-            if is_colsubsidio_source(source):
-                item = scrape_colsubsidio(source)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_by_source = {
+            executor.submit(scrape_source, source): source
+            for source in sources
+        }
+        for future in as_completed(future_by_source):
+            source = future_by_source[future]
+            try:
+                item = future.result()
                 if item:
                     results.append(item)
-                time.sleep(1)
-                continue
-
-            html = fetch_html(source["product_url"])
-            product_name = extract_product_name(
-                html,
-                source["search_name"],
-                source.get("product_name_hint"),
-            )
-            price_cop, list_price_cop, discount_percent = extract_price_pair(html)
-
-            if price_cop is None:
-                print(f"No encontre precio en: {source['product_url']}")
-                continue
-
-            match_status, match_score, match_notes = validate_product_match(
-                source,
-                product_name,
-            )
-
-            results.append(
-                ScrapedPrice(
-                    pharmacy_name=source["pharmacy_name"],
-                    pharmacy_website=source["pharmacy_website"],
-                    search_name=source["search_name"],
-                    product_name=product_name,
-                    price_cop=price_cop,
-                    list_price_cop=list_price_cop,
-                    discount_percent=discount_percent,
-                    product_match_status=match_status,
-                    product_match_score=match_score,
-                    match_notes=match_notes,
-                    product_url=source["product_url"],
-                )
-            )
-            time.sleep(1)
-        except (HTTPError, URLError, TimeoutError) as error:
-            print(f"No pude leer {source['product_url']}: {error}")
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+                print(f"No pude leer {source['product_url']}: {error}")
+            except Exception as error:
+                print(f"Error procesando {source['product_url']}: {error}")
 
     return results

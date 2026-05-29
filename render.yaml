@@ -8,7 +8,13 @@ services:
     envVars:
       - key: PRECIOMED_USERNAME
         value: admin
+      - key: PRECIOMED_ADMIN_EMAIL
+        value: admin@preciomed.local
+      - key: PRECIOMED_PASSWORD_HASH
+        sync: false
       - key: PRECIOMED_SECRET_KEY
+        generateValue: true
+      - key: SCRAPER_JOB_TOKEN
         generateValue: true
       - key: MAX_USERS
         value: 100000
@@ -27,12 +33,12 @@ services:
       - key: RESET_MAX_ATTEMPTS
         value: 5
       - key: SMTP_HOST
-        value: ""
+        sync: false
       - key: SMTP_PORT
         value: 587
       - key: EMAIL_USER
-        value: ""
+        sync: false
       - key: EMAIL_PASSWORD
-        value: ""
+        sync: false
       - key: EMAIL_FROM
-        value: ""
+        sync: false

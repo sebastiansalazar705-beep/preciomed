@@ -28,15 +28,11 @@ El archivo `render.yaml` ya contiene esta configuracion.
 
 ```text
 PRECIOMED_USERNAME=admin
-PRECIOMED_PASSWORD_HASH=<hash sha256 de tu contrasena>
+PRECIOMED_PASSWORD_HASH=<hash bcrypt de tu contrasena>
 PRECIOMED_SECRET_KEY=<clave larga aleatoria>
 ```
 
-Si no configuras `PRECIOMED_PASSWORD_HASH`, la app usa la contrasena inicial:
-
-```text
-preciomed123
-```
+En Render debes configurar `PRECIOMED_PASSWORD_HASH`. Para desarrollo local puedes usar `PRECIOMED_DEV_PASSWORD` en tu entorno.
 
 ## Error comun: No open ports detected
 

@@ -14,6 +14,7 @@ La version principal usada para organizar este repositorio fue `upload-preciomed
 - Bloqueo basico por intentos fallidos de login.
 - Roles de usuario: `admin` y `cliente`.
 - Dashboard administrativo separado del dashboard de clientes.
+- Autorizacion de tratamiento de datos personales en registro, con referencia a la Ley 1581 de 2012 de Colombia.
 - Interfaz moderna con menu lateral, tarjetas, buscador y vista responsive.
 - Dashboard de medicamentos.
 - Filtros por medicamento, farmacia, precio minimo y precio maximo.
@@ -21,6 +22,7 @@ La version principal usada para organizar este repositorio fue `upload-preciomed
 - Validacion de coincidencia del producto encontrado contra la URL esperada.
 - Vista imprimible desde el boton `Imprimir vista`.
 - Actualizacion manual de precios desde el boton `Actualizar precios`.
+- Endpoint protegido para actualizacion automatica de precios desde Render Cron.
 - Base de datos SQLite.
 
 ## Usuario inicial
@@ -29,7 +31,7 @@ Para desarrollo local:
 
 ```text
 Correo: admin@preciomed.local
-Contrasena: preciomed123
+Contrasena: define PRECIOMED_DEV_PASSWORD en tu entorno local.
 ```
 
 En Render se recomienda configurar variables de entorno:
@@ -40,6 +42,7 @@ PRECIOMED_ADMIN_EMAIL=admin@preciomed.local
 ADMIN_EMAILS=admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
 PRECIOMED_PASSWORD_HASH=<hash bcrypt de tu contrasena>
 PRECIOMED_SECRET_KEY=<clave larga aleatoria>
+SCRAPER_JOB_TOKEN=<token largo aleatorio para tareas automaticas>
 MAX_USERS=100000
 SESSION_HOURS=8
 REMEMBER_SESSION_DAYS=30
@@ -54,7 +57,8 @@ EMAIL_PASSWORD=tu_password_de_aplicacion
 EMAIL_FROM=tu_correo@gmail.com
 ```
 
-Si no defines `PRECIOMED_PASSWORD_HASH`, se usa la contrasena inicial de desarrollo.
+En Render `PRECIOMED_PASSWORD_HASH` y `PRECIOMED_SECRET_KEY` son obligatorios.
+Consulta `RENDER_CONFIG.md` antes de desplegar.
 Usa `MAX_USERS=0` si quieres permitir registros ilimitados.
 
 ## Seguridad y recuperacion de cuenta
@@ -153,6 +157,12 @@ O desde terminal:
 python run_scraper.py
 ```
 
+Para automatizar en Render, configura un Cron Job que llame el endpoint protegido:
+
+```text
+/cron/actualizar-precios?token=<SCRAPER_JOB_TOKEN>
+```
+
 ## Exportar datos a CSV
 
 ```powershell
@@ -221,6 +231,9 @@ uvicorn app:app --host 0.0.0.0 --port $PORT
 ```
 
 El archivo `render.yaml` ya incluye esa configuracion.
+Antes de redeplegar una instancia con usuarios reales, configura persistencia para
+`data/prices.sqlite3` o migra a una base externa. El filesystem por defecto de
+Render es efimero y puede perder cambios locales al reiniciar o redeplegar.
 
 ## Nota academica
 

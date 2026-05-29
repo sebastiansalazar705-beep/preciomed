@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import re
 
 from config import DATA_DIR, DB_PATH
 
@@ -30,7 +31,11 @@ def init_db():
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 search_name TEXT NOT NULL UNIQUE,
-                category TEXT
+                category TEXT,
+                display_name TEXT,
+                normalized_name TEXT,
+                brand TEXT,
+                laboratory TEXT
             );
 
             CREATE TABLE IF NOT EXISTS price_observations (
@@ -59,7 +64,19 @@ def init_db():
                 role TEXT NOT NULL DEFAULT 'cliente',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
-                last_login_at TEXT
+                last_login_at TEXT,
+                data_processing_consent_at TEXT,
+                data_processing_consent_version TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS scraper_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                source TEXT,
+                items_saved INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT
             );
 
             CREATE TABLE IF NOT EXISTS app_start_logs (
@@ -99,9 +116,17 @@ def init_db():
             """
         )
         ensure_price_observation_columns(connection)
+        ensure_product_columns(connection)
         ensure_user_columns(connection)
+        migrate_hydration_products(connection)
         connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_latest ON price_observations(product_id, pharmacy_id, id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_match_status ON price_observations(product_match_status)"
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_reset_codes_email ON password_reset_codes(email)"
@@ -131,6 +156,65 @@ def ensure_price_observation_columns(connection):
             connection.execute(sql)
 
 
+def normalize_medicine_key(value):
+    value = (value or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def display_medicine_name(value):
+    value = re.sub(r"\s+", " ", (value or "").strip())
+    if not value:
+        return value
+
+    keep_upper = {"mg", "ml", "mcg", "ui", "meq", "g"}
+    words = []
+    for word in value.split(" "):
+        lower_word = word.lower()
+        if lower_word in keep_upper:
+            words.append(lower_word)
+        elif lower_word.isupper():
+            words.append(word)
+        else:
+            words.append(lower_word[:1].upper() + lower_word[1:])
+    return " ".join(words)
+
+
+def ensure_product_columns(connection):
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(products)").fetchall()
+    }
+    migrations = {
+        "display_name": "ALTER TABLE products ADD COLUMN display_name TEXT",
+        "normalized_name": "ALTER TABLE products ADD COLUMN normalized_name TEXT",
+        "brand": "ALTER TABLE products ADD COLUMN brand TEXT",
+        "laboratory": "ALTER TABLE products ADD COLUMN laboratory TEXT",
+    }
+    for column_name, sql in migrations.items():
+        if column_name not in existing_columns:
+            connection.execute(sql)
+
+    connection.execute(
+        """
+        UPDATE products
+        SET normalized_name = lower(trim(search_name))
+        WHERE normalized_name IS NULL OR normalized_name = ''
+        """
+    )
+    for row in connection.execute(
+        "SELECT id, search_name FROM products WHERE display_name IS NULL OR display_name = ''"
+    ).fetchall():
+        connection.execute(
+            "UPDATE products SET display_name = ?, normalized_name = ? WHERE id = ?",
+            (
+                display_medicine_name(row["search_name"]),
+                normalize_medicine_key(row["search_name"]),
+                row["id"],
+            ),
+        )
+
+
 def ensure_user_columns(connection):
     existing_columns = {
         row["name"]
@@ -141,6 +225,12 @@ def ensure_user_columns(connection):
         "email": "ALTER TABLE users ADD COLUMN email TEXT",
         "role": "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'cliente'",
         "last_login_at": "ALTER TABLE users ADD COLUMN last_login_at TEXT",
+        "data_processing_consent_at": (
+            "ALTER TABLE users ADD COLUMN data_processing_consent_at TEXT"
+        ),
+        "data_processing_consent_version": (
+            "ALTER TABLE users ADD COLUMN data_processing_consent_version TEXT"
+        ),
     }
     for column_name, sql in migrations.items():
         if column_name not in existing_columns:
@@ -160,6 +250,85 @@ def ensure_user_columns(connection):
         WHERE full_name IS NULL OR full_name = ''
         """
     )
+
+
+def migrate_hydration_products(connection):
+    electrolit_id = upsert_product_in_connection(
+        connection,
+        "electrolit",
+        "hidratacion",
+        "Electrolit",
+        "Electrolit",
+        "Pisa",
+    )
+    enterolyte_id = upsert_product_in_connection(
+        connection,
+        "enterolyte",
+        "hidratacion",
+        "Enterolyte",
+        "Enterolyte",
+        "",
+    )
+    suero = connection.execute(
+        "SELECT id FROM products WHERE lower(search_name) = 'suero oral'"
+    ).fetchone()
+    if not suero:
+        return
+
+    connection.execute(
+        """
+        UPDATE price_observations
+        SET product_id = ?
+        WHERE product_id = ?
+          AND lower(product_name) LIKE '%electrolit%'
+        """,
+        (electrolit_id, suero["id"]),
+    )
+    connection.execute(
+        """
+        UPDATE price_observations
+        SET product_id = ?
+        WHERE product_id = ?
+          AND lower(product_name) LIKE '%enterolyte%'
+        """,
+        (enterolyte_id, suero["id"]),
+    )
+
+
+def upsert_product_in_connection(
+    connection,
+    search_name,
+    category=None,
+    display_name=None,
+    brand=None,
+    laboratory=None,
+):
+    normalized_name = normalize_medicine_key(search_name)
+    display_name = display_name or display_medicine_name(search_name)
+    connection.execute(
+        """
+        INSERT INTO products (
+            search_name,
+            category,
+            display_name,
+            normalized_name,
+            brand,
+            laboratory
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(search_name) DO UPDATE SET
+            category = COALESCE(excluded.category, products.category),
+            display_name = COALESCE(excluded.display_name, products.display_name),
+            normalized_name = excluded.normalized_name,
+            brand = COALESCE(excluded.brand, products.brand),
+            laboratory = COALESCE(excluded.laboratory, products.laboratory)
+        """,
+        (search_name, category, display_name, normalized_name, brand, laboratory),
+    )
+    return connection.execute(
+        "SELECT id FROM products WHERE search_name = ?",
+        (search_name,),
+    ).fetchone()["id"]
 
 
 def utc_now():
@@ -211,7 +380,8 @@ def fetch_users():
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, full_name, email, role, is_active, created_at, last_login_at
+            SELECT id, username, full_name, email, role, is_active, created_at,
+                   last_login_at, data_processing_consent_at, data_processing_consent_version
             FROM users
             ORDER BY created_at ASC
             """
@@ -222,7 +392,9 @@ def get_user_by_username(username):
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, full_name, email, password_hash, role, is_active, created_at, last_login_at
+            SELECT id, username, full_name, email, password_hash, role, is_active,
+                   created_at, last_login_at, data_processing_consent_at,
+                   data_processing_consent_version
             FROM users
             WHERE username = ?
             """,
@@ -234,7 +406,9 @@ def get_user_by_email(email):
     with get_connection() as connection:
         return connection.execute(
             """
-            SELECT id, username, full_name, email, password_hash, role, is_active, created_at, last_login_at
+            SELECT id, username, full_name, email, password_hash, role, is_active,
+                   created_at, last_login_at, data_processing_consent_at,
+                   data_processing_consent_version
             FROM users
             WHERE lower(email) = lower(?)
             """,
@@ -242,14 +416,40 @@ def get_user_by_email(email):
         ).fetchone()
 
 
-def create_user(username, full_name, email, password_hash, role="cliente"):
+def create_user(
+    username,
+    full_name,
+    email,
+    password_hash,
+    role="cliente",
+    data_processing_consent_at=None,
+    data_processing_consent_version=None,
+):
     with get_connection() as connection:
         connection.execute(
             """
-            INSERT INTO users (username, full_name, email, password_hash, role, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (
+                username,
+                full_name,
+                email,
+                password_hash,
+                role,
+                created_at,
+                data_processing_consent_at,
+                data_processing_consent_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (username, full_name, email, password_hash, role, utc_now()),
+            (
+                username,
+                full_name,
+                email,
+                password_hash,
+                role,
+                utc_now(),
+                data_processing_consent_at,
+                data_processing_consent_version,
+            ),
         )
         return connection.execute(
             "SELECT id FROM users WHERE username = ?",
@@ -370,14 +570,6 @@ def create_password_reset_code(user_id, email, security_code, expires_at, ip_add
             """,
             (utc_now(), user_id),
         )
-
-
-def update_user_role(user_id, role):
-    with get_connection() as connection:
-        connection.execute(
-            "UPDATE users SET role = ? WHERE id = ?",
-            (role, user_id),
-        )
         connection.execute(
             """
             INSERT INTO password_reset_codes (
@@ -393,6 +585,14 @@ def update_user_role(user_id, role):
             VALUES (?, ?, ?, ?, ?, 0, 0, ?)
             """,
             (user_id, email, security_code, utc_now(), expires_at, ip_address),
+        )
+
+
+def update_user_role(user_id, role):
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE users SET role = ? WHERE id = ?",
+            (role, user_id),
         )
 
 
@@ -478,21 +678,22 @@ def upsert_pharmacy(name, website=None):
         return row["id"]
 
 
-def upsert_product(search_name, category=None):
+def upsert_product(
+    search_name,
+    category=None,
+    display_name=None,
+    brand=None,
+    laboratory=None,
+):
     with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO products (search_name, category)
-            VALUES (?, ?)
-            ON CONFLICT(search_name) DO UPDATE SET category = excluded.category
-            """,
-            (search_name, category),
+        return upsert_product_in_connection(
+            connection,
+            search_name,
+            category,
+            display_name,
+            brand,
+            laboratory,
         )
-        row = connection.execute(
-            "SELECT id FROM products WHERE search_name = ?",
-            (search_name,),
-        ).fetchone()
-        return row["id"]
 
 
 def save_price_observation(
@@ -556,6 +757,9 @@ def fetch_latest_prices():
             )
             SELECT
                 p.search_name,
+                p.display_name,
+                p.brand,
+                p.laboratory,
                 po.product_name,
                 ph.name AS pharmacy_name,
                 ph.website,
@@ -574,4 +778,41 @@ def fetch_latest_prices():
             JOIN pharmacies ph ON ph.id = po.pharmacy_id
             ORDER BY p.search_name, po.price_cop ASC
             """
+        ).fetchall()
+
+
+def create_scraper_run(source="manual"):
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO scraper_runs (started_at, status, source)
+            VALUES (?, 'running', ?)
+            """,
+            (utc_now(), source),
+        )
+        return cursor.lastrowid
+
+
+def finish_scraper_run(run_id, status, items_saved=0, error_message=None):
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE scraper_runs
+            SET finished_at = ?, status = ?, items_saved = ?, error_message = ?
+            WHERE id = ?
+            """,
+            (utc_now(), status, items_saved, error_message, run_id),
+        )
+
+
+def fetch_scraper_runs(limit=20):
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT id, started_at, finished_at, status, source, items_saved, error_message
+            FROM scraper_runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
