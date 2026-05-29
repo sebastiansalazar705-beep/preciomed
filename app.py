@@ -7,6 +7,7 @@ import re
 import secrets
 import socket
 import smtplib
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from http import HTTPStatus
@@ -397,6 +398,30 @@ def parse_price_filter(value):
     return int(digits) if digits else None
 
 
+def normalize_search_text(value):
+    value = unicodedata.normalize("NFKD", (value or "").strip().lower())
+    value = "".join(
+        character for character in value if not unicodedata.combining(character)
+    )
+    value = re.sub(r"(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)", " ", value)
+    return " ".join(value.split())
+
+
+def text_matches_search(query, *values):
+    if not query:
+        return True
+
+    normalized_values = [normalize_search_text(value) for value in values]
+    if any(query in value for value in normalized_values):
+        return True
+
+    query_tokens = set(re.findall(r"[a-z]+|\d+", query))
+    searchable_tokens = set(
+        re.findall(r"[a-z]+|\d+", " ".join(normalized_values))
+    )
+    return bool(query_tokens) and query_tokens <= searchable_tokens
+
+
 def latest_rows():
     init_db()
     rows = []
@@ -411,22 +436,23 @@ def latest_rows():
 
 
 def apply_filters(rows, medicine="", pharmacy="", min_price="", max_price=""):
-    medicine = (medicine or "").strip().lower()
-    pharmacy = (pharmacy or "").strip().lower()
+    medicine = normalize_search_text(medicine)
+    pharmacy = normalize_search_text(pharmacy)
     min_price_value = parse_price_filter(min_price)
     max_price_value = parse_price_filter(max_price)
 
     filtered_rows = []
     for row in rows:
         row_price = row["price_cop"] or 0
-        if (
-            medicine
-            and medicine not in row["search_name"].lower()
-            and medicine not in row["product_name"].lower()
-            and medicine not in row.get("display_name", "").lower()
+        row_pharmacy_name = normalize_search_text(row["pharmacy_name"])
+        if not text_matches_search(
+            medicine,
+            row["search_name"],
+            row["product_name"],
+            row.get("display_name", ""),
         ):
             continue
-        if pharmacy and pharmacy != row["pharmacy_name"].lower():
+        if pharmacy and pharmacy != row_pharmacy_name:
             continue
         if min_price_value is not None and row_price < min_price_value:
             continue
