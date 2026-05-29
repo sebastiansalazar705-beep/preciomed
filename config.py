@@ -4,7 +4,8 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "prices.sqlite3"
+DB_DIR = Path(os.environ.get("PRECIOMED_DB_DIR", DATA_DIR)).expanduser()
+DB_PATH = DB_DIR / "prices.sqlite3"
 PRODUCTS_CSV = DATA_DIR / "products.csv"
 PRODUCT_SOURCES_CSV = DATA_DIR / "product_sources.csv"
 PHARMACIES_CSV = DATA_DIR / "pharmacies.csv"

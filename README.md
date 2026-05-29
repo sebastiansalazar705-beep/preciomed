@@ -43,6 +43,7 @@ ADMIN_EMAILS=admin@preciomed.local,admin2@preciomed.local,admin3@preciomed.local
 PRECIOMED_PASSWORD_HASH=<hash bcrypt de tu contrasena>
 PRECIOMED_SECRET_KEY=<clave larga aleatoria>
 SCRAPER_JOB_TOKEN=<token largo aleatorio para tareas automaticas>
+PRECIOMED_DB_DIR=/var/data  # Solo en Render si configuras disco persistente.
 MAX_USERS=100000
 SESSION_HOURS=8
 REMEMBER_SESSION_DAYS=30
@@ -232,8 +233,10 @@ uvicorn app:app --host 0.0.0.0 --port $PORT
 
 El archivo `render.yaml` ya incluye esa configuracion.
 Antes de redeplegar una instancia con usuarios reales, configura persistencia para
-`data/prices.sqlite3` o migra a una base externa. El filesystem por defecto de
-Render es efimero y puede perder cambios locales al reiniciar o redeplegar.
+`prices.sqlite3` o migra a una base externa. En local la base queda en
+`data/prices.sqlite3`. En Render con disco persistente monta el disco en
+`/var/data` y configura `PRECIOMED_DB_DIR=/var/data`. El filesystem por defecto
+de Render es efimero y puede perder cambios locales al reiniciar o redeplegar.
 
 ## Nota academica
 

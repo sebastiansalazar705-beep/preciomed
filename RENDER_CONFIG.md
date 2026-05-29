@@ -11,6 +11,7 @@
 
 ## Variables recomendadas
 
+- `PRECIOMED_DB_DIR`: directorio donde se guarda `prices.sqlite3`. En local no hace falta configurarla. En Render con disco persistente usa `/var/data`.
 - `MAX_USERS`
 - `SESSION_HOURS`
 - `REMEMBER_SESSION_DAYS`
@@ -36,8 +37,10 @@ python -c "import bcrypt; print(bcrypt.hashpw(b'tu-contrasena-segura', bcrypt.ge
 
 Render usa filesystem efimero por defecto: los cambios en archivos locales se pierden al reiniciar o redeplegar el servicio. Para conservar usuarios, logs y precios en SQLite, configura una de estas opciones antes de produccion:
 
-- Disco persistente montado sobre `/opt/render/project/src/data` en el web service.
+- Disco persistente montado sobre `/var/data` en el web service y variable `PRECIOMED_DB_DIR=/var/data`.
 - Migracion a una base externa como Render Postgres.
+
+No montes el disco directamente sobre `data/`: esa carpeta tambien contiene los CSV del repositorio (`products.csv`, `product_sources.csv`, `pharmacies.csv`) y un montaje podria ocultarlos. La aplicacion separa los CSV del archivo SQLite mediante `PRECIOMED_DB_DIR`.
 
 No ejecutes `run_scraper.py` desde un Render Cron Job separado si la app sigue usando SQLite local: los cron jobs no pueden acceder al disco persistente del web service. Usa el endpoint protegido del web service o migra a Postgres.
 

@@ -3,12 +3,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import re
 
-from config import DATA_DIR, DB_PATH
+from config import DB_PATH
 
 
 @contextmanager
 def get_connection():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     try:
