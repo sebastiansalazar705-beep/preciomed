@@ -37,6 +37,12 @@ LOGIN_LOCK_MINUTES = int(os.environ.get("LOGIN_LOCK_MINUTES", "15"))
 RESET_CODE_MINUTES = int(os.environ.get("RESET_CODE_MINUTES", "15"))
 RESET_MAX_ATTEMPTS = int(os.environ.get("RESET_MAX_ATTEMPTS", "5"))
 
+# Token compartido para tareas automaticas externas, por ejemplo Render Cron.
+# Si no se configura, los endpoints programados quedan deshabilitados.
+SCRAPER_JOB_TOKEN = os.environ.get("SCRAPER_JOB_TOKEN", "")
+SCRAPER_REQUEST_TIMEOUT = int(os.environ.get("SCRAPER_REQUEST_TIMEOUT", "18"))
+SCRAPER_MAX_WORKERS = int(os.environ.get("SCRAPER_MAX_WORKERS", "4"))
+
 # Configuracion de correo SMTP para recuperar contrasena.
 # En Render se recomienda guardar estos datos como variables de entorno.
 EMAIL_USER = os.environ.get("EMAIL_USER", "")

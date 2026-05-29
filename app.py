@@ -14,7 +14,7 @@ from html import escape
 from urllib.parse import urlencode
 
 import bcrypt
-from fastapi import FastAPI, Form, Request
+from fastapi import BackgroundTasks, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from config import (
@@ -28,6 +28,7 @@ from config import (
     REMEMBER_SESSION_DAYS,
     RESET_CODE_MINUTES,
     RESET_MAX_ATTEMPTS,
+    SCRAPER_JOB_TOKEN,
     SESSION_HOURS,
     SMTP_HOST,
     SMTP_PORT,
@@ -42,6 +43,7 @@ from database import (
     fetch_activity_logs_by_email,
     fetch_app_start_logs,
     fetch_latest_prices,
+    fetch_scraper_runs,
     fetch_users,
     get_latest_password_reset_code_by_email,
     get_password_reset_code,
@@ -60,8 +62,8 @@ from run_scraper import run as run_scraper
 
 
 APP_NAME = "PrecioMed"
+DATA_PROCESSING_VERSION = "ley-1581-2012-v1"
 DEFAULT_USERNAME = "admin"
-DEFAULT_PASSWORD = "preciomed123"
 DEFAULT_EMAIL = "admin@preciomed.local"
 DEFAULT_FULL_NAME = "Administrador PrecioMed"
 ROLE_ADMIN = "admin"
@@ -126,7 +128,10 @@ def startup_event():
 
 
 def get_secret_key():
-    return os.environ.get("PRECIOMED_SECRET_KEY", "dev-secret-change-in-render")
+    secret_key = os.environ.get("PRECIOMED_SECRET_KEY")
+    if os.environ.get("RENDER") == "true" and not secret_key:
+        raise RuntimeError("PRECIOMED_SECRET_KEY debe configurarse en Render.")
+    return secret_key or "dev-secret-change-in-render"
 
 
 def get_admin_username():
@@ -158,7 +163,12 @@ def get_password_hash():
     password_hash = os.environ.get("PRECIOMED_PASSWORD_HASH")
     if password_hash:
         return password_hash
-    return hash_password(DEFAULT_PASSWORD)
+    dev_password = os.environ.get("PRECIOMED_DEV_PASSWORD")
+    if dev_password and os.environ.get("RENDER") != "true":
+        return hash_password(dev_password)
+    raise RuntimeError(
+        "Configura PRECIOMED_PASSWORD_HASH en produccion o PRECIOMED_DEV_PASSWORD en desarrollo local."
+    )
 
 
 def hash_password(password):
@@ -288,6 +298,27 @@ def discount(value):
     return f"{float(value):.1f}%"
 
 
+def format_medicine_name(value):
+    value = re.sub(r"\s+", " ", (value or "").strip())
+    if not value:
+        return value
+    lowercase_units = {"mg", "ml", "mcg", "ui", "meq", "g"}
+    formatted = []
+    for word in value.split(" "):
+        lower_word = word.lower()
+        if lower_word in lowercase_units:
+            formatted.append(lower_word)
+        elif any(character.isdigit() for character in word):
+            formatted.append(word)
+        else:
+            formatted.append(lower_word[:1].upper() + lower_word[1:])
+    return " ".join(formatted)
+
+
+def pharmacy_count_text(count):
+    return f"{count} {'farmacia' if count == 1 else 'farmacias'}"
+
+
 def status_label(value):
     return {
         "ok": "Verificado",
@@ -368,7 +399,15 @@ def parse_price_filter(value):
 
 def latest_rows():
     init_db()
-    return [dict(row) for row in fetch_latest_prices()]
+    rows = []
+    for row in fetch_latest_prices():
+        item = dict(row)
+        item["display_name"] = format_medicine_name(
+            item.get("display_name") or item["search_name"]
+        )
+        item["product_name"] = format_medicine_name(item["product_name"])
+        rows.append(item)
+    return rows
 
 
 def apply_filters(rows, medicine="", pharmacy="", min_price="", max_price=""):
@@ -380,7 +419,12 @@ def apply_filters(rows, medicine="", pharmacy="", min_price="", max_price=""):
     filtered_rows = []
     for row in rows:
         row_price = row["price_cop"] or 0
-        if medicine and medicine not in row["search_name"].lower() and medicine not in row["product_name"].lower():
+        if (
+            medicine
+            and medicine not in row["search_name"].lower()
+            and medicine not in row["product_name"].lower()
+            and medicine not in row.get("display_name", "").lower()
+        ):
             continue
         if pharmacy and pharmacy != row["pharmacy_name"].lower():
             continue
@@ -405,6 +449,7 @@ def group_comparisons(rows):
         comparisons.append(
             {
                 "medicine": medicine,
+                "display_name": sorted_items[0].get("display_name") if sorted_items else format_medicine_name(medicine),
                 "items": sorted_items,
                 "best": best,
                 "pharmacy_count": len({item["pharmacy_name"] for item in sorted_items}),
@@ -695,6 +740,38 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 margin: 18px 0;
             }}
             .summary strong {{ display: block; font-size: 28px; margin-top: 4px; }}
+            .best-price-banner {{
+                align-items: center;
+                background: linear-gradient(135deg, #dff6f2, #eef7ff);
+                border: 1px solid #9ddbd1;
+                border-left: 6px solid var(--brand);
+                border-radius: 8px;
+                display: flex;
+                justify-content: space-between;
+                gap: 14px;
+                margin: 8px 0 14px;
+                padding: 14px 16px;
+            }}
+            .best-price-banner strong {{
+                color: var(--brand-dark);
+                font-size: 18px;
+            }}
+            .best-price-banner span {{
+                color: #315363;
+                font-weight: 700;
+                white-space: nowrap;
+            }}
+            .consent-box {{
+                align-items: flex-start;
+                display: flex;
+                gap: 10px;
+                line-height: 1.45;
+            }}
+            .consent-box input {{
+                margin-top: 4px;
+                min-height: auto;
+                width: auto;
+            }}
             .quick-grid {{
                 display: grid;
                 gap: 14px;
@@ -724,6 +801,8 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 .app-shell {{ grid-template-columns: 1fr; }}
                 .sidebar {{ height: auto; position: relative; }}
                 .filters, .summary, .quick-grid {{ grid-template-columns: 1fr; }}
+                .best-price-banner {{ align-items: flex-start; flex-direction: column; }}
+                .best-price-banner span {{ white-space: normal; }}
                 main {{ padding: 16px; }}
                 .hero {{ padding: 24px; }}
                 .hero h1 {{ font-size: 30px; }}
@@ -762,12 +841,14 @@ def home(
 
     user = current_user(request)
     rows = latest_rows()
+    admin = is_admin_user(user)
+    if not admin:
+        rows = [row for row in rows if row["product_match_status"] == "ok"]
     filtered_rows = apply_filters(rows, medicine, pharmacy, min_price, max_price)
     comparisons = group_comparisons(filtered_rows)
     pharmacies = sorted({row["pharmacy_name"] for row in rows})
     verified = sum(1 for row in filtered_rows if row["product_match_status"] == "ok")
     user_total = count_users()
-    admin = is_admin_user(user)
     welcome_name = escape((user["full_name"] or user["email"]).split()[0])
     forbidden_html = (
         '<div class="panel error">No tienes permiso para entrar al panel administrativo.</div>'
@@ -794,9 +875,9 @@ def home(
     summary = f"""
     <section class="summary">
         <div class="panel">Medicamentos<strong>{len(comparisons)}</strong></div>
-        <div class="panel">Registros<strong>{len(filtered_rows)}</strong></div>
+        <div class="panel">{'Registros' if admin else 'Precios'}<strong>{len(filtered_rows)}</strong></div>
         <div class="panel">Farmacias<strong>{len(pharmacies)}</strong></div>
-        <div class="panel">{'Usuarios' if admin else 'Validados'}<strong>{f'{user_total}/{max_users_label()}' if admin else verified}</strong></div>
+        <div class="panel">{'Usuarios' if admin else 'Coincidencias'}<strong>{f'{user_total}/{max_users_label()}' if admin else verified}</strong></div>
     </section>
     """
 
@@ -812,32 +893,56 @@ def home(
         for row in comparison["items"]:
             query = urlencode({"medicine": row["search_name"], "pharmacy": row["pharmacy_name"]})
             status = row["product_match_status"] or "review"
-            rows_html.append(
-                f"""
-                <tr>
-                    <td>{escape(row["pharmacy_name"])}</td>
-                    <td>
-                        {escape(row["product_name"])}
-                        <div class="muted">{escape(row["match_notes"] or "")}</div>
-                    </td>
-                    <td class="price">{money(row["price_cop"])}</td>
-                    <td>{money(row["list_price_cop"])}</td>
-                    <td>{discount(row["discount_percent"])}</td>
-                    <td>
-                        <span class="badge {escape(status)}">{status_label(status)}</span>
-                        <div class="muted">{row["product_match_score"] or 0}% coincidencia</div>
-                    </td>
-                    <td>{escape(row["observed_at"][:10])}</td>
-                    <td><a href="{escape(row["product_url"])}" target="_blank">Ver</a></td>
-                    <td><a href="/?{escape(query)}">Comparar</a></td>
-                </tr>
-                """
-            )
+            if admin:
+                rows_html.append(
+                    f"""
+                    <tr>
+                        <td>{escape(row["pharmacy_name"])}</td>
+                        <td>
+                            {escape(row["product_name"])}
+                            <div class="muted">{escape(row["match_notes"] or "")}</div>
+                        </td>
+                        <td class="price">{money(row["price_cop"])}</td>
+                        <td>{money(row["list_price_cop"])}</td>
+                        <td>{discount(row["discount_percent"])}</td>
+                        <td>
+                            <span class="badge {escape(status)}">{status_label(status)}</span>
+                            <div class="muted">{row["product_match_score"] or 0}% coincidencia</div>
+                        </td>
+                        <td>{escape(row["observed_at"][:10])}</td>
+                        <td><a href="{escape(row["product_url"])}" target="_blank">Ver</a></td>
+                        <td><a href="/?{escape(query)}">Comparar</a></td>
+                    </tr>
+                    """
+                )
+            else:
+                rows_html.append(
+                    f"""
+                    <tr>
+                        <td>{escape(row["pharmacy_name"])}</td>
+                        <td>{escape(row["product_name"])}</td>
+                        <td class="price">{money(row["price_cop"])}</td>
+                        <td>{money(row["list_price_cop"])}</td>
+                        <td>{discount(row["discount_percent"])}</td>
+                        <td><a href="{escape(row["product_url"])}" target="_blank">Ver producto</a></td>
+                    </tr>
+                    """
+                )
+        admin_headers = """
+            <th>Validacion</th>
+            <th>Fecha</th>
+            <th>Fuente</th>
+            <th>Accion</th>
+        """
+        client_headers = "<th>Fuente</th>"
         sections.append(
             f"""
             <section>
-                <h2>{escape(comparison["medicine"])}</h2>
-                <p>{best_text}. Disponible en {comparison["pharmacy_count"]} farmacia(s).</p>
+                <h2>{escape(comparison["display_name"])}</h2>
+                <div class="best-price-banner">
+                    <strong>{best_text}</strong>
+                    <span>Disponible en {pharmacy_count_text(comparison["pharmacy_count"])}</span>
+                </div>
                 <table>
                     <thead>
                         <tr>
@@ -846,10 +951,7 @@ def home(
                             <th>Precio</th>
                             <th>Precio antes</th>
                             <th>Descuento</th>
-                            <th>Validacion</th>
-                            <th>Fecha</th>
-                            <th>Fuente</th>
-                            <th>Accion</th>
+                            {admin_headers if admin else client_headers}
                         </tr>
                     </thead>
                     <tbody>{"".join(rows_html)}</tbody>
@@ -869,7 +971,7 @@ def home(
     body = f"""
     <section class="hero">
         <h1>Hola, {welcome_name}. Compara medicamentos con claridad.</h1>
-        <p>Busca productos, revisa farmacias y encuentra el mejor precio publicado sin perder de vista la validacion de coincidencia.</p>
+        <p>Busca productos, revisa farmacias y encuentra el mejor precio publicado con comparaciones claras y consistentes.</p>
     </section>
     {forbidden_html}
     <div class="actions">
@@ -889,6 +991,31 @@ def home(
 @app.head("/")
 def home_head():
     return Response(status_code=HTTPStatus.OK)
+
+
+@app.get("/tratamiento-datos", response_class=HTMLResponse)
+def data_processing_policy(request: Request):
+    user = current_user(request)
+    body = """
+    <section class="panel">
+        <h1>Tratamiento de datos personales</h1>
+        <p>PrecioMed trata datos personales de usuarios registrados para crear y administrar cuentas, autenticar accesos, proteger la seguridad de la plataforma, gestionar recuperacion de contrasena y prestar el servicio de comparacion de precios.</p>
+        <p>La autorizacion se solicita conforme a la Ley 1581 de 2012 de Colombia y sus normas reglamentarias sobre proteccion de datos personales. El titular puede conocer, actualizar, rectificar o solicitar la eliminacion de sus datos cuando legalmente proceda.</p>
+        <p>Los datos sensibles no se publican en vistas de cliente. La informacion administrativa, logs, fechas, acciones y validaciones queda restringida a usuarios administradores.</p>
+        <p>PrecioMed no debe almacenar claves, tokens ni credenciales en el repositorio ni en el frontend. Las credenciales operativas deben configurarse como variables de entorno del despliegue.</p>
+    </section>
+    """
+    if user:
+        return HTMLResponse(
+            layout(
+                "Tratamiento de datos",
+                body,
+                authenticated=True,
+                user=user,
+                active="profile",
+            )
+        )
+    return HTMLResponse(layout("Tratamiento de datos", body))
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -917,7 +1044,6 @@ def login_form(request: Request, error: str = ""):
         </form>
         <p><a href="/registro">Crear usuario nuevo</a></p>
         <p><a href="/recuperar">Olvidaste tu contrasena?</a></p>
-        <p class="muted">Correo inicial: admin@preciomed.local. Contrasena inicial: preciomed123. Cambialos en Render con variables de entorno.</p>
     </section>
     """
     return HTMLResponse(layout("Login", body))
@@ -988,7 +1114,7 @@ def register_form(request: Request, error: str = "", success: str = ""):
         return RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
 
     error_messages = {
-        "max": "Se alcanzó el número máximo de usuarios permitidos.",
+        "max": "Se alcanzo el numero maximo de usuarios permitidos.",
         "exists": "Ese correo electronico ya esta registrado.",
         "email": "Escribe un correo electronico valido.",
         "match": "Las contrasenas no coinciden.",
@@ -1007,6 +1133,10 @@ def register_form(request: Request, error: str = "", success: str = ""):
             <input name="email" type="email" placeholder="Correo electronico" autocomplete="email" required>
             <input name="password" type="password" placeholder="Contrasena" autocomplete="new-password" required>
             <input name="confirm_password" type="password" placeholder="Confirmar contrasena" autocomplete="new-password" required>
+            <label class="consent-box muted">
+                <input name="data_processing_consent" type="checkbox" value="1" required>
+                <span>Autorizo a PrecioMed el tratamiento de mis datos personales para crear y administrar mi cuenta, gestionar seguridad y prestar el servicio, conforme a la Ley 1581 de 2012 de Colombia y la <a href="/tratamiento-datos" target="_blank">politica de tratamiento de datos personales</a>.</span>
+            </label>
             <button type="submit">Crear usuario</button>
         </form>
         <p class="muted">La contrasena debe incluir minimo 8 caracteres, una mayuscula, una minuscula y un numero.</p>
@@ -1023,6 +1153,7 @@ def register_user(
     email: str = Form(...),
     password: str = Form(...),
     confirm_password: str = Form(...),
+    data_processing_consent: str = Form(""),
 ):
     full_name = full_name.strip()
     email = email.strip().lower()
@@ -1038,9 +1169,19 @@ def register_user(
         return RedirectResponse("/registro?error=match", status_code=HTTPStatus.SEE_OTHER)
     if validate_password_strength(password):
         return RedirectResponse("/registro?error=weak", status_code=HTTPStatus.SEE_OTHER)
+    if data_processing_consent != "1":
+        return RedirectResponse("/registro?error=consent", status_code=HTTPStatus.SEE_OTHER)
 
     role = role_for_email(email)
-    create_user(username, full_name, email, hash_password(password), role)
+    create_user(
+        username,
+        full_name,
+        email,
+        hash_password(password),
+        role,
+        data_processing_consent_at=utc_now().isoformat(),
+        data_processing_consent_version=DATA_PROCESSING_VERSION,
+    )
     log_activity(
         "register",
         username=username,
@@ -1281,6 +1422,7 @@ def new_password_form(request: Request, email: str = "", code: str = "", error: 
         "invalid": "El codigo no es valido o ya no esta disponible.",
         "match": "La nueva contrasena y su confirmacion no coinciden.",
         "weak": "La contrasena debe tener minimo 8 caracteres, una mayuscula, una minuscula y un numero.",
+        "consent": "Debes aceptar la autorizacion de tratamiento de datos personales para registrarte.",
     }
     error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
     success_html = '<p class="success">Contrasena actualizada correctamente. Ya puedes iniciar sesion.</p>' if success else ""
@@ -1364,6 +1506,7 @@ def users_view(request: Request):
                 <td>{status}</td>
                 <td>{escape(account["created_at"][:19])}</td>
                 <td>{escape((account["last_login_at"] or "")[:19])}</td>
+                <td>{escape((account["data_processing_consent_at"] or "")[:19])}</td>
             </tr>
             """
         )
@@ -1399,6 +1542,7 @@ def users_view(request: Request):
                     <th>Estado</th>
                     <th>Creado</th>
                     <th>Ultimo ingreso</th>
+                    <th>Consentimiento datos</th>
                 </tr>
             </thead>
             <tbody>{"".join(users_html)}</tbody>
@@ -1435,6 +1579,7 @@ def admin_dashboard(request: Request):
     rows = latest_rows()
     user_rows = fetch_users()
     log_rows = fetch_activity_logs(12)
+    scraper_rows = fetch_scraper_runs(8)
     admin_total = sum(1 for item in user_rows if item["role"] == ROLE_ADMIN)
     client_total = sum(1 for item in user_rows if item["role"] == ROLE_CLIENT)
     pharmacies = sorted({row["pharmacy_name"] for row in rows})
@@ -1454,6 +1599,19 @@ def admin_dashboard(request: Request):
     )
     medicine_html = "".join(f"<li>{escape(item)}</li>" for item in medicines[:12])
     pharmacy_html = "".join(f"<li>{escape(item)}</li>" for item in pharmacies)
+    scraper_html = "".join(
+        f"""
+        <tr>
+            <td>{escape(row["started_at"][:19])}</td>
+            <td>{escape((row["finished_at"] or "")[:19])}</td>
+            <td>{escape(row["status"])}</td>
+            <td>{escape(row["source"] or "")}</td>
+            <td>{row["items_saved"]}</td>
+            <td>{escape(row["error_message"] or "")}</td>
+        </tr>
+        """
+        for row in scraper_rows
+    )
 
     body = f"""
     <div class="back-row"><a class="button secondary" href="/">Volver al Dashboard</a></div>
@@ -1479,6 +1637,16 @@ def admin_dashboard(request: Request):
     </section>
     <section>
         <div class="section-head">
+            <h2>Scraping</h2>
+            <a class="button secondary" href="/actualizar">Ejecutar ahora</a>
+        </div>
+        <table>
+            <thead><tr><th>Inicio</th><th>Fin</th><th>Estado</th><th>Origen</th><th>Guardados</th><th>Error</th></tr></thead>
+            <tbody>{scraper_html or '<tr><td colspan="6">Sin ejecuciones registradas.</td></tr>'}</tbody>
+        </table>
+    </section>
+    <section>
+        <div class="section-head">
             <h2>Actividad reciente</h2>
             <a class="button secondary" href="/usuarios">Ver todo</a>
         </div>
@@ -1498,6 +1666,26 @@ def actualizar(request: Request):
         return redirect
     run_scraper()
     return RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
+
+
+def valid_scraper_job_token(token):
+    return bool(SCRAPER_JOB_TOKEN) and hmac.compare_digest(token or "", SCRAPER_JOB_TOKEN)
+
+
+@app.get("/cron/actualizar-precios")
+def scheduled_price_update(token: str = ""):
+    if not valid_scraper_job_token(token):
+        return Response("Endpoint protegido.", status_code=HTTPStatus.FORBIDDEN)
+    run_scraper(source="render-cron")
+    return {"status": "ok"}
+
+
+@app.post("/cron/actualizar-precios")
+def scheduled_price_update_post(background_tasks: BackgroundTasks, token: str = ""):
+    if not valid_scraper_job_token(token):
+        return Response("Endpoint protegido.", status_code=HTTPStatus.FORBIDDEN)
+    background_tasks.add_task(run_scraper, "render-cron")
+    return {"status": "queued"}
 
 
 @app.get("/health")

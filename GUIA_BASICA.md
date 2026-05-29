@@ -177,7 +177,7 @@ admin@preciomed.local
 Contrasena inicial:
 
 ```text
-preciomed123
+Define PRECIOMED_DEV_PASSWORD en tu entorno local.
 ```
 
 ## Como se conecta frontend y backend
