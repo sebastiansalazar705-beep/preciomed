@@ -542,26 +542,26 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
         <style>
             :root {{
                 color-scheme: light;
-                --bg: #eef6f7;
+                --bg: #f7f1ff;
                 --surface: #ffffff;
-                --surface-soft: #f8fbfc;
-                --line: #d9e7ea;
-                --text: #102331;
-                --muted: #627785;
-                --brand: #128277;
-                --brand-dark: #0d4f57;
-                --brand-soft: #dff6f2;
-                --accent: #2870c9;
-                --warning: #9a6a00;
+                --surface-soft: #fbf8ff;
+                --line: #e4d7f5;
+                --text: #241634;
+                --muted: #746385;
+                --brand: #8b5cf6;
+                --brand-dark: #5b21b6;
+                --brand-soft: #efe7ff;
+                --accent: #a78bfa;
+                --warning: #8a5a00;
                 --danger: #b4234b;
-                --shadow: 0 18px 45px rgba(16, 35, 49, 0.12);
+                --shadow: 0 18px 45px rgba(59, 27, 95, 0.13);
             }}
             * {{ box-sizing: border-box; }}
             body {{
                 margin: 0;
                 background:
-                    radial-gradient(circle at top left, rgba(18, 130, 119, 0.16), transparent 34%),
-                    linear-gradient(135deg, #eef6f7 0%, #f7fbfc 48%, #edf7f1 100%);
+                    radial-gradient(circle at top left, rgba(139, 92, 246, 0.18), transparent 34%),
+                    linear-gradient(135deg, #f7f1ff 0%, #fbf8ff 48%, #f2ecff 100%);
                 color: var(--text);
                 font-family: Inter, Segoe UI, Arial, Helvetica, sans-serif;
             }}
@@ -572,7 +572,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 min-height: 100vh;
             }}
             .sidebar {{
-                background: linear-gradient(180deg, #0d4f57 0%, #0f6c65 100%);
+                background: linear-gradient(180deg, #5b21b6 0%, #7c3aed 100%);
                 color: white;
                 padding: 24px 18px;
                 position: sticky;
@@ -598,9 +598,9 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
             }}
             .brand-mark {{
                 align-items: center;
-                background: #baf2df;
+                background: #eadcff;
                 border-radius: 14px;
-                color: #073f46;
+                color: #4c1d95;
                 display: inline-flex;
                 font-size: 18px;
                 font-weight: 900;
@@ -609,7 +609,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 width: 38px;
             }}
             .brand small {{
-                color: #d9fffb;
+                color: #efe7ff;
                 display: block;
                 font-size: 12px;
                 font-weight: 500;
@@ -645,14 +645,14 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 padding: 12px;
             }}
             .user-card span {{
-                color: #c6f8f0;
+                color: #eadcff;
                 display: block;
                 font-size: 12px;
                 margin-top: 2px;
             }}
             .avatar {{
                 align-items: center;
-                background: #e8fff8;
+                background: #f4edff;
                 border-radius: 999px;
                 color: var(--brand-dark);
                 display: inline-flex;
@@ -673,7 +673,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
             p {{ color: var(--muted); line-height: 1.5; }}
             .hero {{
                 background:
-                    linear-gradient(120deg, rgba(13,79,87,.92), rgba(18,130,119,.82)),
+                    linear-gradient(120deg, rgba(76,29,149,.92), rgba(139,92,246,.82)),
                     url("https://images.unsplash.com/photo-1587854692152-cbe660dbde88?auto=format&fit=crop&w=1400&q=80");
                 background-position: center;
                 background-size: cover;
@@ -690,12 +690,12 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 background: var(--surface);
                 border: 1px solid var(--line);
                 border-radius: 12px;
-                box-shadow: 0 10px 30px rgba(16, 35, 49, 0.07);
+                box-shadow: 0 10px 30px rgba(59, 27, 95, 0.07);
                 padding: 20px;
                 transition: transform .18s ease, box-shadow .18s ease;
             }}
             .panel:hover {{
-                box-shadow: 0 16px 42px rgba(16, 35, 49, 0.11);
+                box-shadow: 0 16px 42px rgba(59, 27, 95, 0.11);
                 transform: translateY(-1px);
             }}
             .filters {{
@@ -713,7 +713,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
             }}
             input:focus, select:focus {{
                 border-color: var(--brand);
-                box-shadow: 0 0 0 4px rgba(18, 130, 119, .13);
+                box-shadow: 0 0 0 4px rgba(139, 92, 246, .16);
                 outline: none;
             }}
             button, .button {{
@@ -736,7 +736,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 background: white;
                 border-collapse: collapse;
                 border-radius: 12px;
-                box-shadow: 0 8px 26px rgba(16, 35, 49, 0.07);
+                box-shadow: 0 8px 26px rgba(59, 27, 95, 0.07);
                 overflow: hidden;
                 width: 100%;
             }}
@@ -746,7 +746,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 text-align: left;
                 vertical-align: top;
             }}
-            th {{ background: #eaf3f2; color: #274654; font-size: 13px; }}
+            th {{ background: #f0e7ff; color: #4c1d95; font-size: 13px; }}
             .price {{ font-weight: 700; white-space: nowrap; }}
             .muted {{ color: var(--muted); font-size: 13px; }}
             .badge {{
@@ -768,8 +768,8 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
             .summary strong {{ display: block; font-size: 28px; margin-top: 4px; }}
             .best-price-banner {{
                 align-items: center;
-                background: linear-gradient(135deg, #dff6f2, #eef7ff);
-                border: 1px solid #9ddbd1;
+                background: linear-gradient(135deg, #efe7ff, #f8f4ff);
+                border: 1px solid #c4b5fd;
                 border-left: 6px solid var(--brand);
                 border-radius: 8px;
                 display: flex;
@@ -783,7 +783,7 @@ def layout(title, body, authenticated=False, user=None, active="dashboard"):
                 font-size: 18px;
             }}
             .best-price-banner span {{
-                color: #315363;
+                color: #5b4b73;
                 font-weight: 700;
                 white-space: nowrap;
             }}
