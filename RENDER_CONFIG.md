@@ -27,6 +27,18 @@
 - `SCRAPER_REQUEST_TIMEOUT`
 - `SCRAPER_MAX_WORKERS`
 
+## Variables obligatorias para recuperar contrasena por correo
+
+Si quieres que los clientes reciban codigos reales de recuperacion de contrasena, configura SMTP en Render:
+
+- `SMTP_HOST`: servidor SMTP, por ejemplo `smtp.gmail.com`.
+- `SMTP_PORT`: puerto SMTP. Usa `587` para STARTTLS o `465` para SSL directo.
+- `EMAIL_USER`: correo usado para enviar.
+- `EMAIL_PASSWORD`: contrasena de aplicacion o clave SMTP, nunca la publiques.
+- `EMAIL_FROM`: remitente visible. Normalmente el mismo valor de `EMAIL_USER`.
+
+Si estas variables faltan o son incorrectas, la app no puede enviar correos. El codigo se registra internamente, el intento queda en logs y el usuario ve un mensaje de error en recuperacion.
+
 Para crear `PRECIOMED_PASSWORD_HASH`:
 
 ```bash

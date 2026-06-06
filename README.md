@@ -116,7 +116,7 @@ Flujo de recuperacion:
 
 Para enviar correos reales configura SMTP en Render. Con Gmail debes crear una `contrasena de aplicacion`, no usar tu contrasena normal.
 
-Si SMTP no esta configurado, la app no se rompe: guarda el codigo en la base de datos y lo imprime en la consola del servidor para pruebas locales.
+Si SMTP no esta configurado, la app no se rompe: registra el intento y muestra un error claro al usuario. En desarrollo local puede imprimir el codigo en consola para pruebas, pero en Render no imprime codigos de recuperacion para evitar exponer datos sensibles en logs.
 
 ## Instalar dependencias
 

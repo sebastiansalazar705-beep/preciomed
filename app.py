@@ -375,10 +375,15 @@ def send_security_code(email, code):
         )
     )
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.send_message(message)
+    if SMTP_PORT == 465:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.send_message(message)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.send_message(message)
     return True, "Correo enviado."
 
 
@@ -1328,9 +1333,14 @@ def forgot_password_form(request: Request, sent: str = "", error: str = ""):
     if is_authenticated(request):
         return RedirectResponse("/", status_code=HTTPStatus.SEE_OTHER)
 
-    error_html = '<p class="error">Escribe un correo electronico valido.</p>' if error else ""
+    error_messages = {
+        "email": "Escribe un correo electronico valido.",
+        "not_found": "No encontramos un usuario activo con ese correo.",
+        "send_failed": "No pudimos enviar el correo de recuperacion. Intenta de nuevo mas tarde o contacta al administrador.",
+    }
+    error_html = f'<p class="error">{error_messages.get(error, "")}</p>' if error else ""
     sent_html = (
-        '<p class="success">Si el correo existe, enviaremos un codigo de seguridad. Revisa tu bandeja de entrada.</p>'
+        '<p class="success">Enviamos un codigo de seguridad a tu correo. Revisa tu bandeja de entrada y carpeta de spam.</p>'
         if sent
         else ""
     )
@@ -1358,26 +1368,43 @@ def request_password_reset(request: Request, email: str = Form(...)):
         return RedirectResponse("/recuperar?error=email", status_code=HTTPStatus.SEE_OTHER)
 
     user = get_user_by_email(email)
-    if user and user["is_active"]:
-        code = generate_security_code()
-        expires_at = (utc_now() + timedelta(minutes=RESET_CODE_MINUTES)).isoformat()
-        create_password_reset_code(user["id"], user["email"], code, expires_at, request_ip(request))
-        try:
-            email_sent, message = send_security_code(user["email"], code)
-        except Exception as error:
-            email_sent = False
-            message = str(error)
-
+    if not user or not user["is_active"]:
         log_activity(
             "password_reset_request",
-            username=user["username"],
-            email=user["email"],
+            email=email,
             ip_identifier=request_ip(request),
-            status="exitoso" if email_sent else "error",
-            message=message if email_sent else f"Codigo creado, pero no se pudo enviar correo: {message}",
+            status="error",
+            message="Solicitud de recuperacion para correo no registrado o usuario inactivo.",
         )
-        if not email_sent:
+        return RedirectResponse(
+            "/recuperar?error=not_found",
+            status_code=HTTPStatus.SEE_OTHER,
+        )
+
+    code = generate_security_code()
+    expires_at = (utc_now() + timedelta(minutes=RESET_CODE_MINUTES)).isoformat()
+    create_password_reset_code(user["id"], user["email"], code, expires_at, request_ip(request))
+    try:
+        email_sent, message = send_security_code(user["email"], code)
+    except Exception as error:
+        email_sent = False
+        message = str(error)
+
+    log_activity(
+        "password_reset_request",
+        username=user["username"],
+        email=user["email"],
+        ip_identifier=request_ip(request),
+        status="exitoso" if email_sent else "error",
+        message=message if email_sent else f"Codigo creado, pero no se pudo enviar correo: {message}",
+    )
+    if not email_sent:
+        if os.environ.get("RENDER") != "true":
             print(f"Codigo de recuperacion PrecioMed para {user['email']}: {code}")
+        return RedirectResponse(
+            "/recuperar?error=send_failed",
+            status_code=HTTPStatus.SEE_OTHER,
+        )
 
     return RedirectResponse("/recuperar?sent=1", status_code=HTTPStatus.SEE_OTHER)
 
